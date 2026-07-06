@@ -12,13 +12,18 @@ from deskbot.research import (
     _is_blocked_domain,
     _resolve_quick_model,
     _resolve_synthesis_model,
+    _score_credibility,
     _slugify,
+    extract_factors,
     gather_sources,
     generate_additional_angles,
     generate_followup_questions,
+    generate_hypothesis,
+    pairwise_relationship_questions,
     prompt_research_setup,
     run_deep_research,
     save_report,
+    scientific_relationship_questions,
     synthesize_report,
     verify_section,
 )
@@ -442,8 +447,9 @@ def test_prompt_research_setup_quick_choice_with_default_models(monkeypatch):
     agent = Agent(config, memory=Memory(), tools=ToolRegistry())
     monkeypatch.setattr(OllamaClient, "list_models", lambda self: ["some-model"])
 
-    answers = iter(["1", "", ""])  # method=Quick, planning model blank, writing model blank
-    monkeypatch.setattr("builtins.input", lambda *_args: next(answers))
+    monkeypatch.setattr("deskbot.research._choose", lambda message, options, default_index=0: "quick")
+    monkeypatch.setattr("deskbot.research._ask_model", lambda message, available: "")
+    monkeypatch.setattr("deskbot.research._ask_text", lambda message, default="": "")
 
     options = prompt_research_setup(agent)
 
@@ -458,8 +464,9 @@ def test_prompt_research_setup_picks_models_and_supports_same_keyword(monkeypatc
     agent = Agent(config, memory=Memory(), tools=ToolRegistry())
     monkeypatch.setattr(OllamaClient, "list_models", lambda self: ["model-a", "model-b"])
 
-    answers = iter(["3", "model-a", "same"])  # method=Deep, planning=model-a, writing=same as planning
-    monkeypatch.setattr("builtins.input", lambda *_args: next(answers))
+    monkeypatch.setattr("deskbot.research._choose", lambda message, options, default_index=0: "deep")
+    monkeypatch.setattr("deskbot.research._ask_model", lambda message, available: "model-a")
+    monkeypatch.setattr("deskbot.research._ask_text", lambda message, default="": "same")
 
     options = prompt_research_setup(agent)
 
@@ -473,23 +480,410 @@ def test_prompt_research_setup_custom_reads_every_field(monkeypatch):
     agent = Agent(config, memory=Memory(), tools=ToolRegistry())
     monkeypatch.setattr(OllamaClient, "list_models", lambda self: [])
 
-    answers = iter([
-        "4",     # method = Custom
-        "5",     # max_sources
-        "2000",  # per_source_chars
-        "20000", # max_corpus_chars
-        "1",     # followup_rounds
-        "3",     # max_total_rounds
-        "n",     # verify_sections
-        "n",     # adaptive_digging
-        "",      # planning model (blank)
-        "",      # writing model (blank)
-    ])
-    monkeypatch.setattr("builtins.input", lambda *_args: next(answers))
+    monkeypatch.setattr("deskbot.research._choose", lambda message, options, default_index=0: "custom")
+    confirms = iter([False, False, False])  # factor_analysis, verify_sections, adaptive_digging
+    numbers = iter([5, 2000, 20000, 1, 3])  # max_sources, per_source_chars, max_corpus_chars, followup_rounds, max_total_rounds
+    monkeypatch.setattr("deskbot.research._ask_confirm", lambda message, default: next(confirms))
+    monkeypatch.setattr("deskbot.research._ask_number", lambda message, default: next(numbers))
+    monkeypatch.setattr("deskbot.research._ask_model", lambda message, available: "")
+    monkeypatch.setattr("deskbot.research._ask_text", lambda message, default="": "")
 
     options = prompt_research_setup(agent)
 
     assert options == ResearchOptions(
         max_sources=5, per_source_chars=2000, max_corpus_chars=20000,
         followup_rounds=1, max_total_rounds=3, verify_sections=False, adaptive_digging=False,
+        factor_analysis=False,
     )
+
+
+def test_prompt_research_setup_relentless_choice(monkeypatch):
+    config = load_config()
+    agent = Agent(config, memory=Memory(), tools=ToolRegistry())
+    monkeypatch.setattr(OllamaClient, "list_models", lambda self: [])
+
+    monkeypatch.setattr("deskbot.research._choose", lambda message, options, default_index=0: "relentless")
+    monkeypatch.setattr("deskbot.research._ask_model", lambda message, available: "")
+    monkeypatch.setattr("deskbot.research._ask_text", lambda message, default="": "")
+
+    options = prompt_research_setup(agent)
+
+    assert options.factor_analysis is True
+    assert options.max_total_rounds == RESEARCH_MODE_PRESETS["relentless"].max_total_rounds
+
+
+def test_prompt_research_setup_custom_factor_analysis_uses_relentless_ceilings(monkeypatch):
+    config = load_config()
+    agent = Agent(config, memory=Memory(), tools=ToolRegistry())
+    monkeypatch.setattr(OllamaClient, "list_models", lambda self: [])
+
+    monkeypatch.setattr("deskbot.research._choose", lambda message, options, default_index=0: "custom")
+    confirms = iter([True, False, False])  # factor_analysis, scientific_mode, verify_sections
+    numbers = iter([3000, 2])  # per_source_chars, followup_rounds
+    monkeypatch.setattr("deskbot.research._ask_confirm", lambda message, default: next(confirms))
+    monkeypatch.setattr("deskbot.research._ask_number", lambda message, default: next(numbers))
+    monkeypatch.setattr("deskbot.research._ask_model", lambda message, available: "")
+    monkeypatch.setattr("deskbot.research._ask_text", lambda message, default="": "")
+
+    options = prompt_research_setup(agent)
+
+    assert options.factor_analysis is True
+    assert options.scientific_mode is False
+    assert options.max_total_rounds == RESEARCH_MODE_PRESETS["relentless"].max_total_rounds
+    assert options.per_source_chars == 3000
+    assert options.followup_rounds == 2
+    assert options.verify_sections is False
+
+
+def test_prompt_research_setup_custom_can_enable_scientific_mode(monkeypatch):
+    config = load_config()
+    agent = Agent(config, memory=Memory(), tools=ToolRegistry())
+    monkeypatch.setattr(OllamaClient, "list_models", lambda self: [])
+
+    monkeypatch.setattr("deskbot.research._choose", lambda message, options, default_index=0: "custom")
+    confirms = iter([True, True, True])  # factor_analysis, scientific_mode, verify_sections
+    numbers = iter([3000, 2])
+    monkeypatch.setattr("deskbot.research._ask_confirm", lambda message, default: next(confirms))
+    monkeypatch.setattr("deskbot.research._ask_number", lambda message, default: next(numbers))
+    monkeypatch.setattr("deskbot.research._ask_model", lambda message, available: "")
+    monkeypatch.setattr("deskbot.research._ask_text", lambda message, default="": "")
+
+    options = prompt_research_setup(agent)
+
+    assert options.factor_analysis is True
+    assert options.scientific_mode is True
+
+
+def test_prompt_research_setup_scientist_choice(monkeypatch):
+    config = load_config()
+    agent = Agent(config, memory=Memory(), tools=ToolRegistry())
+    monkeypatch.setattr(OllamaClient, "list_models", lambda self: [])
+
+    monkeypatch.setattr("deskbot.research._choose", lambda message, options, default_index=0: "scientist")
+    monkeypatch.setattr("deskbot.research._ask_model", lambda message, available: "")
+    monkeypatch.setattr("deskbot.research._ask_text", lambda message, default="": "")
+
+    options = prompt_research_setup(agent)
+
+    assert options.factor_analysis is True
+    assert options.scientific_mode is True
+    assert options.max_total_rounds == RESEARCH_MODE_PRESETS["scientist"].max_total_rounds
+
+
+def test_extract_factors_stops_on_none(monkeypatch):
+    config = load_config()
+    monkeypatch.setattr(OllamaClient, "chat", lambda self, model, messages, temperature=0.4, tools=None: "NONE")
+    agent = Agent(config, memory=Memory(), tools=ToolRegistry())
+    sources = [Source(url="https://a.com", title="A", text="some findings")]
+    assert extract_factors(agent, "topic", sources, covered_factors=[]) == []
+
+
+def test_extract_factors_parses_and_excludes_covered(monkeypatch):
+    config = load_config()
+    monkeypatch.setattr(
+        OllamaClient, "chat",
+        lambda self, model, messages, temperature=0.4, tools=None: "1. Sleep quality\n2. Caffeine dose\n",
+    )
+    agent = Agent(config, memory=Memory(), tools=ToolRegistry())
+    sources = [Source(url="https://a.com", title="A", text="some findings")]
+    factors = extract_factors(agent, "topic", sources, covered_factors=["Caffeine dose"], n=2)
+    assert factors == ["Sleep quality"]  # already-covered factor filtered out
+
+
+def test_extract_factors_returns_empty_without_sources():
+    config = load_config()
+    agent = Agent(config, memory=Memory(), tools=ToolRegistry())
+    assert extract_factors(agent, "topic", [], covered_factors=[]) == []
+
+
+def test_extract_factors_samples_both_broad_and_recent_sources(monkeypatch):
+    """Regression test: a real run on "does creatine improve cognitive
+    performance" got extract_factors stuck returning nothing after several
+    narrow follow-up rounds, because it only ever sampled the most recent
+    (increasingly narrow) sources — the broad overview source with general
+    framing (dosage, duration, population...) had aged out of the window.
+    It must always include early sources too, however many rounds have run."""
+    config = load_config()
+    captured_user_content = {}
+
+    def fake_chat(self, model, messages, temperature=0.4, tools=None):
+        captured_user_content["text"] = next(m["content"] for m in messages if m["role"] == "user")
+        return "NONE"
+
+    monkeypatch.setattr(OllamaClient, "chat", fake_chat)
+    agent = Agent(config, memory=Memory(), tools=ToolRegistry())
+
+    sources = [Source(url=f"https://s{i}.com", title=f"Source {i}", text=f"text {i}") for i in range(10)]
+    extract_factors(agent, "topic", sources, covered_factors=[])
+
+    sample_text = captured_user_content["text"]
+    assert "Source 0" in sample_text  # broad/overview source — must not age out
+    assert "Source 9" in sample_text  # most recent/narrow source
+    assert "Source 5" not in sample_text  # middle sources are deliberately excluded
+
+
+def test_pairwise_relationship_questions_covers_every_unique_pair():
+    factors = ["A", "B", "C"]
+    pairs = pairwise_relationship_questions("topic", factors, already_asked=set())
+    assert len(pairs) == 3  # 3 choose 2
+    keys = {key for key, _ in pairs}
+    assert frozenset({"A", "B"}) in keys
+    assert frozenset({"A", "C"}) in keys
+    assert frozenset({"B", "C"}) in keys
+    assert all("topic" in question for _, question in pairs)
+
+
+def test_pairwise_relationship_questions_skips_already_asked():
+    factors = ["A", "B", "C"]
+    already_asked = {frozenset({"A", "B"})}
+    pairs = pairwise_relationship_questions("topic", factors, already_asked)
+    keys = {key for key, _ in pairs}
+    assert frozenset({"A", "B"}) not in keys
+    assert len(pairs) == 2
+
+
+def test_run_deep_research_factor_analysis_researches_pairs_and_stops_when_dry(monkeypatch):
+    agent = _agent_with_fake_browser(
+        results_by_query={
+            "topic": [{"url": "https://a.com/1", "title": "A1"}],
+            "How does Speed relate to or correlate with Cost, in the context of topic?": [
+                {"url": "https://pair.com/1", "title": "Pair source"}
+            ],
+        },
+        no_verify=True,
+    )
+    agent.config._raw.setdefault("research", {})["followup_rounds"] = 0
+
+    calls = {"factors": 0}
+
+    def fake_chat(self, model, messages, temperature=0.4, tools=None):
+        system_content = next((m["content"] for m in messages if m["role"] == "system"), "")
+        user_content = next((m["content"] for m in messages if m["role"] == "user"), "")
+        if "concrete factors" in system_content.lower():
+            calls["factors"] += 1
+            return "1. Speed\n2. Cost\n" if calls["factors"] == 1 else "NONE"
+        if user_content.startswith("Angle:"):
+            return "SECTION_CONTENT"
+        return "## Introduction\nFRAMING_CONTENT\n\n## Conclusion\nFRAMING_CONTENT"
+
+    monkeypatch.setattr(OllamaClient, "chat", fake_chat)
+
+    options = ResearchOptions(followup_rounds=0, adaptive_digging=False, factor_analysis=True, verify_sections=False)
+    result = run_deep_research(agent, "topic", options=options)
+
+    round_labels = {s.round_label for s in result.sources}
+    assert "How does Speed relate to or correlate with Cost, in the context of topic?" in round_labels
+    # One round finds factors, then two consecutive dry rounds confirm
+    # exhaustion (a single empty response isn't enough to stop on).
+    assert calls["factors"] == 3
+
+
+def test_run_deep_research_stops_gracefully_on_keyboard_interrupt(monkeypatch):
+    """A single Ctrl+C during digging should stop the digging loop but still
+    let synthesis run normally afterward — it's a momentary interrupt, not a
+    persistent failure state."""
+    agent = _agent_with_fake_browser(
+        results_by_query={"topic": [{"url": "https://a.com/1", "title": "A1"}]},
+        no_verify=True,
+    )
+    agent.config._raw.setdefault("research", {})["followup_rounds"] = 0
+
+    interrupted = {"done": False}
+
+    def fake_chat(self, model, messages, temperature=0.4, tools=None):
+        if not interrupted["done"]:
+            interrupted["done"] = True
+            raise KeyboardInterrupt  # simulates Ctrl+C during the adaptive-digging call
+        return "REPORT_CONTENT"
+
+    monkeypatch.setattr(OllamaClient, "chat", fake_chat)
+
+    options = ResearchOptions(followup_rounds=0, adaptive_digging=True, verify_sections=False)
+    result = run_deep_research(agent, "topic", options=options)
+
+    assert result.sources  # the overview round's source survived
+    assert "REPORT_CONTENT" in result.report  # synthesis still ran normally afterward
+
+
+def test_choose_falls_back_to_numbered_prompt_without_questionary(monkeypatch):
+    import deskbot.research as research_module
+
+    monkeypatch.setattr(research_module, "questionary", None)
+    monkeypatch.setattr("builtins.input", lambda *_args: "2")
+
+    result = research_module._choose("Pick one:", [("a", "Option A"), ("b", "Option B")], default_index=0)
+    assert result == "b"
+
+
+def test_choose_falls_back_to_default_on_invalid_input_without_questionary(monkeypatch):
+    import deskbot.research as research_module
+
+    monkeypatch.setattr(research_module, "questionary", None)
+    monkeypatch.setattr("builtins.input", lambda *_args: "not a number")
+
+    result = research_module._choose("Pick one:", [("a", "Option A"), ("b", "Option B")], default_index=1)
+    assert result == "b"
+
+
+def test_ask_text_falls_back_to_input_without_questionary(monkeypatch):
+    import deskbot.research as research_module
+
+    monkeypatch.setattr(research_module, "questionary", None)
+    monkeypatch.setattr("builtins.input", lambda *_args: "")
+
+    assert research_module._ask_text("Anything?", default="fallback") == "fallback"
+
+
+def test_ask_confirm_falls_back_to_input_without_questionary(monkeypatch):
+    import deskbot.research as research_module
+
+    monkeypatch.setattr(research_module, "questionary", None)
+    monkeypatch.setattr("builtins.input", lambda *_args: "y")
+
+    assert research_module._ask_confirm("Sure?", default=False) is True
+
+
+def test_ask_number_parses_valid_and_falls_back_on_invalid(monkeypatch):
+    import deskbot.research as research_module
+
+    monkeypatch.setattr(research_module, "_ask_text", lambda message, default="": "42")
+    assert research_module._ask_number("How many?", 7) == 42
+
+    monkeypatch.setattr(research_module, "_ask_text", lambda message, default="": "not a number")
+    assert research_module._ask_number("How many?", 7) == 7
+
+
+def test_ask_model_uses_plain_text_when_no_models_available(monkeypatch):
+    import deskbot.research as research_module
+
+    monkeypatch.setattr(research_module, "_ask_text", lambda message, default="": "typed-model")
+    assert research_module._ask_model("Which model?", available=[]) == "typed-model"
+
+
+def test_score_credibility_gov_and_edu_are_always_high():
+    assert _score_credibility("cdc.gov") == "high"
+    assert _score_credibility("mit.edu") == "high"
+    assert _score_credibility("sub.stanford.edu") == "high"
+
+
+def test_score_credibility_known_journals_are_high():
+    assert _score_credibility("nature.com") == "high"
+    assert _score_credibility("pubmed.ncbi.nlm.nih.gov") == "high"
+
+
+def test_score_credibility_known_news_sites_are_medium():
+    assert _score_credibility("bbc.com") == "medium"
+    assert _score_credibility("healthline.com") == "medium"
+
+
+def test_score_credibility_unknown_domain_is_low():
+    assert _score_credibility("some-random-blog.example") == "low"
+
+
+def test_gather_sources_tags_credibility_on_each_source():
+    results = [
+        {"url": "https://cdc.gov/health-info", "title": "CDC info"},
+        {"url": "https://randomblog.example/post", "title": "Blog post"},
+    ]
+    agent = _agent_with_fake_browser(results=results)
+    sources = gather_sources(agent, "topic", max_sources=5, per_source_chars=500, max_corpus_chars=80_000)
+
+    by_url = {s.url: s.credibility for s in sources}
+    assert by_url["https://cdc.gov/health-info"] == "high"
+    assert by_url["https://randomblog.example/post"] == "low"
+
+
+def test_generate_hypothesis_returns_stripped_model_reply(monkeypatch):
+    config = load_config()
+    monkeypatch.setattr(
+        OllamaClient, "chat",
+        lambda self, model, messages, temperature=0.4, tools=None: "  Daily walking reduces cardiovascular risk.  ",
+    )
+    agent = Agent(config, memory=Memory(), tools=ToolRegistry())
+    sources = [Source(url="https://a.com", title="A", text="some findings")]
+    assert generate_hypothesis(agent, "topic", sources) == "Daily walking reduces cardiovascular risk."
+
+
+def test_generate_hypothesis_returns_empty_without_sources():
+    config = load_config()
+    agent = Agent(config, memory=Memory(), tools=ToolRegistry())
+    assert generate_hypothesis(agent, "topic", []) == ""
+
+
+def test_generate_hypothesis_falls_back_to_empty_on_model_error(monkeypatch):
+    config = load_config()
+
+    def raise_error(self, model, messages, temperature=0.4, tools=None):
+        raise OllamaConnectionError("down")
+
+    monkeypatch.setattr(OllamaClient, "chat", raise_error)
+    agent = Agent(config, memory=Memory(), tools=ToolRegistry())
+    sources = [Source(url="https://a.com", title="A", text="some findings")]
+    assert generate_hypothesis(agent, "topic", sources) == ""
+
+
+def test_scientific_relationship_questions_generates_confirm_and_disconfirm_per_pair():
+    factors = ["A", "B"]
+    pairs = scientific_relationship_questions("topic", factors, already_asked=set())
+
+    assert len(pairs) == 2  # one pair -> confirm + disconfirm
+    keys = {key for key, _ in pairs}
+    assert (frozenset({"A", "B"}), "confirm") in keys
+    assert (frozenset({"A", "B"}), "disconfirm") in keys
+    questions = {q for _, q in pairs}
+    assert any("supports" in q.lower() for q in questions)
+    assert any("no relationship" in q.lower() or "contradicts" in q.lower() for q in questions)
+
+
+def test_scientific_relationship_questions_skips_already_asked():
+    factors = ["A", "B"]
+    already_asked = {(frozenset({"A", "B"}), "confirm")}
+    pairs = scientific_relationship_questions("topic", factors, already_asked)
+
+    assert len(pairs) == 1
+    assert pairs[0][0] == (frozenset({"A", "B"}), "disconfirm")
+
+
+def test_run_deep_research_scientific_mode_generates_hypothesis_and_evidence_rounds(monkeypatch):
+    agent = _agent_with_fake_browser(
+        results_by_query={
+            "topic": [{"url": "https://a.com/1", "title": "A1"}],
+            "What evidence supports a relationship between Speed and Cost, in the context of topic?": [
+                {"url": "https://confirm.com/1", "title": "Confirm source"}
+            ],
+            "What evidence shows NO relationship or contradicts a link between Speed and Cost, in the context of topic?": [
+                {"url": "https://disconfirm.com/1", "title": "Disconfirm source"}
+            ],
+        },
+        no_verify=True,
+    )
+    agent.config._raw.setdefault("research", {})["followup_rounds"] = 0
+
+    calls = {"factors": 0, "hypothesis": 0}
+
+    def fake_chat(self, model, messages, temperature=0.4, tools=None):
+        system_content = next((m["content"] for m in messages if m["role"] == "system"), "")
+        sc = system_content.lower()
+        if "formulating a hypothesis" in sc:
+            calls["hypothesis"] += 1
+            return "Speed and Cost are inversely related."
+        if "concrete factors" in sc:
+            calls["factors"] += 1
+            return "1. Speed\n2. Cost\n" if calls["factors"] == 1 else "NONE"
+        return "REPORT_CONTENT"
+
+    monkeypatch.setattr(OllamaClient, "chat", fake_chat)
+
+    options = ResearchOptions(
+        followup_rounds=0, adaptive_digging=False, factor_analysis=True, scientific_mode=True, verify_sections=False,
+    )
+    result = run_deep_research(agent, "topic", options=options)
+
+    assert result.hypothesis == "Speed and Cost are inversely related."
+    round_labels = {s.round_label for s in result.sources}
+    assert "What evidence supports a relationship between Speed and Cost, in the context of topic?" in round_labels
+    assert (
+        "What evidence shows NO relationship or contradicts a link between Speed and Cost, in the context of topic?"
+        in round_labels
+    )
+    assert calls["hypothesis"] == 1

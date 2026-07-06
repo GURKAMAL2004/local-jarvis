@@ -34,6 +34,29 @@ The pipeline, in order:
   7. The report opens with an introduction + bulleted key findings, and
      closes with a conclusion written last (after contradictions are known)
      so it can honestly reflect whatever uncertainty was found.
+  8. Optional factor/correlation digging (ResearchOptions.factor_analysis,
+     on for the "relentless" preset): once the above finishes, deskbot
+     extracts the concrete factors/variables the topic depends on
+     (extract_factors) and researches every pairwise relationship between
+     them (pairwise_relationship_questions — pure combinatorics, not left to
+     the model), pulling in more factors as it goes. This phase only ends on
+     genuine exhaustion (two rounds in a row with nothing new) or the user
+     pressing Ctrl+C — the "relentless" preset's round/budget ceilings are
+     set so high they're not the practical limit. A "Factors & Correlations"
+     section in the report summarizes what was actually found.
+  9. Optional scientific mode (ResearchOptions.scientific_mode, implies
+     factor_analysis, on for the "scientist" preset): before digging,
+     generate_hypothesis states one clear, falsifiable hypothesis. Each
+     factor pair then gets TWO research questions instead of one
+     (scientific_relationship_questions) — one hunting for evidence that
+     SUPPORTS the relationship, one hunting for evidence that CONTRADICTS
+     it, because a real scientist tries to falsify their own hypothesis
+     rather than only confirming it. Every source is tagged with a
+     code-computed credibility tier (_score_credibility — .gov/.edu/known
+     journals = high, reputable news = medium, everything else = low,
+     never model-judged), and synthesize_scientific_assessment rates each
+     relationship's evidence strength (Strong/Moderate/Weak/Conflicting/
+     Insufficient) weighted by that credibility instead of source count alone.
 
 Two-model support: quick_model (config.research.quick_model, falls back to
 the RAM-tier model) drives every planning/checking call; deep_model is
@@ -52,6 +75,12 @@ from typing import Any
 from urllib.parse import urlparse
 
 from rich.console import Console
+from rich.panel import Panel
+
+try:
+    import questionary
+except ImportError:  # pragma: no cover - exercised only when the optional dep is missing
+    questionary = None
 
 from deskbot import paths
 from deskbot.agent import Agent
@@ -67,6 +96,7 @@ DEFAULT_FOLLOWUP_ROUNDS = 3
 DEFAULT_MAX_TOTAL_ROUNDS = 8
 DEFAULT_VERIFY_SECTIONS = True
 DEFAULT_ADAPTIVE_ANGLES_PER_ROUND = 2
+DEFAULT_FACTORS_PER_EXTRACTION = 8
 
 # Low-signal domains a human researcher would skip even if they rank —
 # content farms, redirect/share pages, and sites that block extraction
@@ -108,6 +138,21 @@ class ResearchOptions:
     max_total_rounds: int | None = None
     verify_sections: bool | None = None
     adaptive_digging: bool | None = None
+    # When True, after the normal digging finishes deskbot extracts the key
+    # factors/variables underlying the topic and researches the relationship
+    # between every pair of them, pulling in more factors as it goes — see
+    # the module docstring section on factor/correlation digging. Combined
+    # with the "relentless" preset's huge round/budget ceilings, the only
+    # practical way this run ends is genuine exhaustion or Ctrl+C.
+    factor_analysis: bool | None = None
+    # When True (implies factor_analysis), deskbot behaves like a scientist
+    # instead of a generalist: states an explicit falsifiable hypothesis up
+    # front, actively searches for evidence that would DISPROVE each factor
+    # relationship (not just evidence that supports it), and weighs sources
+    # by a code-computed credibility tier when rating how strong the
+    # evidence actually is — see generate_hypothesis,
+    # scientific_relationship_questions, and synthesize_scientific_assessment.
+    scientific_mode: bool | None = None
     # quick_model drives the cheap planning calls (follow-up questions, "what's
     # still missing" gap-checking). synthesis_model drives every call that
     # writes report prose (sections, fact-check, key findings, contradictions,
@@ -115,6 +160,15 @@ class ResearchOptions:
     quick_model: str | None = None
     synthesis_model: str | None = None
 
+
+# Effectively-unbounded ceilings for the "relentless" preset — large finite
+# numbers rather than infinity so the existing int math (division, budget
+# subtraction) keeps working unchanged. In practice a run this size only
+# ever ends via genuine exhaustion (extract_factors/generate_additional_angles
+# both come back empty) or the user hitting Ctrl+C.
+_RELENTLESS_MAX_SOURCES = 100_000
+_RELENTLESS_MAX_CORPUS_CHARS = 100_000_000
+_RELENTLESS_MAX_TOTAL_ROUNDS = 100_000
 
 # Named depth presets offered by the research menu / `--mode` flag. "standard"
 # is all-None on purpose: it just means "use whatever config.yaml says",
@@ -137,12 +191,40 @@ RESEARCH_MODE_PRESETS: dict[str, ResearchOptions] = {
         verify_sections=True,
         adaptive_digging=True,
     ),
+    "relentless": ResearchOptions(
+        max_sources=_RELENTLESS_MAX_SOURCES,
+        max_corpus_chars=_RELENTLESS_MAX_CORPUS_CHARS,
+        followup_rounds=3,
+        max_total_rounds=_RELENTLESS_MAX_TOTAL_ROUNDS,
+        verify_sections=True,
+        adaptive_digging=True,
+        factor_analysis=True,
+    ),
+    "scientist": ResearchOptions(
+        max_sources=_RELENTLESS_MAX_SOURCES,
+        max_corpus_chars=_RELENTLESS_MAX_CORPUS_CHARS,
+        followup_rounds=3,
+        max_total_rounds=_RELENTLESS_MAX_TOTAL_ROUNDS,
+        verify_sections=True,
+        adaptive_digging=True,
+        factor_analysis=True,
+        scientific_mode=True,
+    ),
 }
 
 RESEARCH_MODE_DESCRIPTIONS: dict[str, str] = {
     "quick": "Single broad search only, no follow-ups, no fact-check. Fastest.",
     "standard": "Broad search + follow-ups + adaptive digging + fact-check. (default)",
     "deep": "More sources/rounds, thorough fact-check. Slowest, most complete.",
+    "relentless": (
+        "Extracts key factors, digs into every relationship/correlation between "
+        "them, and keeps going with no real cap until YOU stop it (Ctrl+C)."
+    ),
+    "scientist": (
+        "Forms a falsifiable hypothesis, actively hunts for evidence that would "
+        "DISPROVE each factor relationship (not just confirm it), and rates "
+        "confidence by source credibility. No real cap — Ctrl+C when satisfied."
+    ),
 }
 
 
@@ -152,6 +234,7 @@ class Source:
     title: str
     text: str = ""
     round_label: str = "initial"  # which question/round this came from — shown in the report
+    credibility: str = "unknown"  # "high" | "medium" | "low" — see _score_credibility()
 
 
 @dataclass
@@ -161,6 +244,36 @@ class ResearchResult:
     followup_questions: list[str] = field(default_factory=list)
     report: str = ""
     saved_path: Path | None = None
+    hypothesis: str = ""  # set only in scientific_mode — see generate_hypothesis()
+
+
+# Credibility is scored from the domain alone — code-driven, not model-judged,
+# for the same reason blocked-domain filtering is: a small model asked "is
+# this source credible?" is unreliable, but "is this domain .gov/.edu or on
+# a known list" is deterministic. Any .gov/.edu domain is always "high"
+# regardless of these lists. Everything unmatched defaults to "low" — the
+# safe assumption for an unknown blog/forum is not to over-trust it.
+HIGH_CREDIBILITY_DOMAINS = {
+    "pubmed.ncbi.nlm.nih.gov", "ncbi.nlm.nih.gov", "nih.gov", "cdc.gov", "who.int",
+    "nature.com", "sciencedirect.com", "thelancet.com", "nejm.org", "jamanetwork.com",
+    "bmj.com", "cochranelibrary.com", "springer.com", "wiley.com", "frontiersin.org",
+    "plos.org", "arxiv.org", "pnas.org", "cell.com", "mayoclinic.org",
+}
+MEDIUM_CREDIBILITY_DOMAINS = {
+    "reuters.com", "bbc.com", "nytimes.com", "healthline.com", "webmd.com",
+    "medicalnewstoday.com", "statnews.com", "apnews.com", "npr.org", "theguardian.com",
+    "scientificamerican.com", "wikipedia.org",
+}
+
+
+def _score_credibility(domain: str) -> str:
+    if domain.endswith(".gov") or domain.endswith(".edu"):
+        return "high"
+    if any(domain == d or domain.endswith("." + d) for d in HIGH_CREDIBILITY_DOMAINS):
+        return "high"
+    if any(domain == d or domain.endswith("." + d) for d in MEDIUM_CREDIBILITY_DOMAINS):
+        return "medium"
+    return "low"
 
 
 def _domain(url: str) -> str:
@@ -245,8 +358,12 @@ def gather_sources(
             logger.info("skipping source (empty page text): %s", cand["url"])
             continue
         console.print(f"  [dim]read:[/dim] {cand['title'][:70]} ({len(text)} chars)")
+        source_url = extracted.get("url", cand["url"])
         sources.append(
-            Source(url=extracted.get("url", cand["url"]), title=cand["title"], text=text, round_label=round_label)
+            Source(
+                url=source_url, title=cand["title"], text=text, round_label=round_label,
+                credibility=_score_credibility(_domain(source_url)),
+            )
         )
         total_chars += len(text)
 
@@ -304,6 +421,25 @@ def generate_followup_questions(
     return _parse_numbered_list(text, n)
 
 
+def _mixed_sample(sources: list[Source], first_n: int = 2, last_n: int = 4) -> list[Source]:
+    """A small sample mixing early sources (broad overview framing) with the
+    most recent ones (latest depth) — used for planning calls that need
+    context without feeding the whole corpus. Recency-only sampling was
+    observed to starve factor/angle extraction of the broad framing once
+    several rounds of narrow follow-ups had run (e.g. after digging into
+    specific biochemical mechanisms, "what factors does this depend on?"
+    got no signal about dosage/duration/population from the overview
+    source). Dedupes by identity in case the source lists overlap."""
+    pool = sources[:first_n] + sources[-last_n:]
+    seen_ids: set[int] = set()
+    out = []
+    for s in pool:
+        if id(s) not in seen_ids:
+            seen_ids.add(id(s))
+            out.append(s)
+    return out
+
+
 def generate_additional_angles(
     agent: Agent,
     topic: str,
@@ -322,13 +458,7 @@ def generate_additional_angles(
 
     model = _resolve_quick_model(agent, quick_model)
 
-    sample_pool = sources[:2] + sources[-4:]
-    seen_ids: set[int] = set()
-    sample_sources = []
-    for s in sample_pool:
-        if id(s) not in seen_ids:
-            seen_ids.add(id(s))
-            sample_sources.append(s)
+    sample_sources = _mixed_sample(sources)
     sample = "\n\n".join(f"[{s.title}]\n{s.text[:1200]}" for s in sample_sources)
     covered = "\n".join(f"- {a}" for a in covered_angles) or "(none yet)"
 
@@ -360,6 +490,139 @@ def generate_additional_angles(
     if text.strip().upper().startswith("NONE"):
         return []
     return [q for q in _parse_numbered_list(text, n) if q.upper() != "NONE"]
+
+
+def extract_factors(
+    agent: Agent,
+    topic: str,
+    sources: list[Source],
+    covered_factors: list[str],
+    n: int = DEFAULT_FACTORS_PER_EXTRACTION,
+    quick_model: str | None = None,
+) -> list[str]:
+    """Factor/correlation digging, step 1: identifies concrete
+    factors/variables the topic actually depends on (e.g. for "coffee and
+    heart health": caffeine dose, genetics, existing conditions, timing,
+    tolerance...), grounding the correlation-chasing in real named things
+    from the sources instead of the model free-associating relationships out
+    of nothing. Returns [] once the model can't name any more that aren't
+    already covered — the natural end of this phase (see
+    pairwise_relationship_questions for step 2)."""
+    if n <= 0 or not sources:
+        return []
+
+    model = _resolve_quick_model(agent, quick_model)
+    sample_sources = _mixed_sample(sources)
+    sample = "\n\n".join(f"[{s.title}]\n{s.text[:1500]}" for s in sample_sources)
+    covered = "\n".join(f"- {f}" for f in covered_factors) or "(none yet)"
+    messages = [
+        {
+            "role": "system",
+            "content": (
+                "You are analyzing a topic to identify the concrete factors/variables it "
+                f"actually depends on. Given the topic and what's been found so far, name up to "
+                f"{n} specific factors — real, named variables a thorough analyst would examine "
+                "(not vague themes) — that are NOT already in the covered list. Examples of the "
+                "right level of specificity: dosage/amount, duration of exposure, population/age "
+                "group, timing, individual variation (e.g. genetics), and method of measurement — "
+                "not the topic restated. If you genuinely can't name any more, reply with EXACTLY "
+                f"the single word: NONE. Otherwise reply with ONLY a numbered list of up to {n} "
+                "short factor names, one per line, no other text."
+            ),
+        },
+        {
+            "role": "user",
+            "content": f"Topic: {topic}\n\nFactors already covered:\n{covered}\n\nFindings so far:\n{sample}",
+        },
+    ]
+    try:
+        text = agent.client.chat(model, messages, temperature=0.6)
+    except (OllamaConnectionError, OllamaModelError) as e:
+        logger.warning("extract_factors failed: %s", e)
+        return []
+
+    if text.strip().upper().startswith("NONE"):
+        logger.info("extract_factors: model reported no more factors")
+        return []
+    covered_lower = {f.lower() for f in covered_factors}
+    factors = [f for f in _parse_numbered_list(text, n) if f.upper() != "NONE" and f.lower() not in covered_lower]
+    if not factors:
+        logger.info("extract_factors: got a reply but parsed no usable factors: %r", text[:200])
+    return factors
+
+
+def pairwise_relationship_questions(
+    topic: str, factors: list[str], already_asked: set[frozenset[str]]
+) -> list[tuple[frozenset[str], str]]:
+    """Factor/correlation digging, step 2 — pure code, no model call: every
+    unordered pair of known factors becomes its own research question. This
+    is what actually drives "relation, correlation between each thing" —
+    deterministic combinatorics rather than hoping the model thinks to
+    compare things on its own, and it naturally produces a lot of rounds as
+    the factor list grows (K factors -> K*(K-1)/2 pairs)."""
+    from itertools import combinations
+
+    pairs = []
+    for a, b in combinations(factors, 2):
+        key = frozenset((a, b))
+        if key in already_asked:
+            continue
+        pairs.append((key, f"How does {a} relate to or correlate with {b}, in the context of {topic}?"))
+    return pairs
+
+
+def generate_hypothesis(agent: Agent, topic: str, sources: list[Source], quick_model: str | None = None) -> str:
+    """Scientific mode, step 1: the first thing a real scientist does is
+    state a clear, falsifiable hypothesis before digging further — not just
+    "research the topic" but "here's a specific claim, now let's see if the
+    evidence actually holds up." Returns "" (mode degrades gracefully to
+    plain factor analysis) if the model call fails."""
+    if not sources:
+        return ""
+
+    model = _resolve_quick_model(agent, quick_model)
+    sample = "\n\n".join(f"[{s.title}]\n{s.text[:1500]}" for s in sources[:4])
+    messages = [
+        {
+            "role": "system",
+            "content": (
+                "You are a scientist formulating a hypothesis. Given the topic and initial "
+                "findings, state ONE clear, specific, falsifiable hypothesis worth testing against "
+                "the evidence — not a vague theme. Reply with ONLY the hypothesis statement, one or "
+                "two sentences, no preamble, no labels."
+            ),
+        },
+        {"role": "user", "content": f"Topic: {topic}\n\nInitial findings:\n{sample}"},
+    ]
+    try:
+        return agent.client.chat(model, messages, temperature=0.5).strip()
+    except (OllamaConnectionError, OllamaModelError) as e:
+        logger.warning("generate_hypothesis failed: %s", e)
+        return ""
+
+
+def scientific_relationship_questions(
+    topic: str, factors: list[str], already_asked: set[tuple[frozenset[str], str]]
+) -> list[tuple[tuple[frozenset[str], str], str]]:
+    """Scientific mode, step 2 — like pairwise_relationship_questions, but
+    actively hunts for BOTH confirming AND disconfirming evidence per pair:
+    a real scientist tries to falsify their own hypothesis rather than only
+    looking for support. Still pure code, no model call — deterministic
+    combinatorics, just two questions per pair instead of one."""
+    from itertools import combinations
+
+    out = []
+    for a, b in combinations(factors, 2):
+        pair = frozenset((a, b))
+        confirm_key = (pair, "confirm")
+        disconfirm_key = (pair, "disconfirm")
+        if confirm_key not in already_asked:
+            out.append((confirm_key, f"What evidence supports a relationship between {a} and {b}, in the context of {topic}?"))
+        if disconfirm_key not in already_asked:
+            out.append(
+                (disconfirm_key, f"What evidence shows NO relationship or contradicts a link between {a} and {b}, in the context of {topic}?")
+            )
+    return out
 
 
 def _resolve_synthesis_model(agent: Agent, override: str | None = None) -> str:
@@ -497,6 +760,80 @@ def synthesize_contradictions(agent: Agent, model: str, topic: str, combined_bod
         return ""
 
 
+def synthesize_factor_relationships(agent: Agent, model: str, topic: str, factors: list[str], combined_body: str) -> str:
+    """Factor/correlation digging, step 3: maps out the factors identified
+    during research and summarizes what the sections actually found about
+    how each pair relates — the analytical payoff of the pairwise-question
+    rounds pairwise_relationship_questions() generated."""
+    factor_list = "\n".join(f"- {f}" for f in factors)
+    messages = [
+        {
+            "role": "system",
+            "content": (
+                "You are a research analyst summarizing a factor/correlation analysis. You will "
+                "be given a topic, a list of factors that were investigated, and the written "
+                "research sections (which include sections specifically about how pairs of these "
+                "factors relate to each other). Write a '## Factors & Correlations' section that: "
+                "(1) briefly lists the factors examined, and (2) for each meaningful relationship "
+                "found between factors, states it plainly — e.g. 'X increases with Y' or "
+                "'X and Z showed no clear relationship in the sources' — citing sources like "
+                "[Source 2]. Only state relationships the sections actually support; say so "
+                "explicitly when the evidence is thin or mixed. Label your output exactly "
+                "'## Factors & Correlations'."
+            ),
+        },
+        {
+            "role": "user",
+            "content": f"Topic: {topic}\n\nFactors examined:\n{factor_list}\n\nSections already written:\n{combined_body}",
+        },
+    ]
+    try:
+        return agent.client.chat(model, messages, temperature=agent.config.temperature)
+    except (OllamaConnectionError, OllamaModelError):
+        return ""
+
+
+def synthesize_scientific_assessment(
+    agent: Agent, model: str, topic: str, hypothesis: str, factors: list[str], sources: list[Source]
+) -> str:
+    """Scientific mode's payoff step: rates evidence strength per factor
+    relationship the way a systematic review would, weighting sources by
+    their code-computed credibility tier (_score_credibility) rather than
+    treating a blog post and a peer-reviewed study as equally trustworthy —
+    the difference between "a report" and "a scientist's assessment"."""
+    factor_list = "\n".join(f"- {f}" for f in factors)
+    sample = "\n\n".join(f"[{s.title} — credibility: {s.credibility}]\n{s.text[:1000]}" for s in sources[:40])
+    messages = [
+        {
+            "role": "system",
+            "content": (
+                "You are a scientist evaluating evidence for a hypothesis, the way a systematic "
+                "review would. You will be given a hypothesis, the factors examined, and source "
+                "excerpts each tagged with a credibility tier (high = peer-reviewed/.gov/.edu "
+                "sources, medium = reputable news/health sites, low = blogs/forums/unknown). For "
+                "each meaningful factor relationship: state the relationship, rate the strength of "
+                "evidence (Strong / Moderate / Weak / Conflicting / Insufficient) weighting "
+                "high-credibility sources more heavily, and explicitly note if the evidence shows "
+                "correlation without established causation. Then list confounding variables or "
+                "limitations a careful scientist would flag, and state whether the evidence "
+                "supports, contradicts, or is inconclusive about the hypothesis. Do not overstate "
+                "certainty. Label your output exactly '## Scientific Assessment'."
+            ),
+        },
+        {
+            "role": "user",
+            "content": (
+                f"Topic: {topic}\n\nHypothesis: {hypothesis}\n\nFactors examined:\n{factor_list}\n\n"
+                f"Source excerpts:\n{sample}"
+            ),
+        },
+    ]
+    try:
+        return agent.client.chat(model, messages, temperature=agent.config.temperature)
+    except (OllamaConnectionError, OllamaModelError):
+        return ""
+
+
 def synthesize_conclusion(agent: Agent, model: str, topic: str, combined_body: str, contradictions: str) -> str:
     """Written last, after contradictions are known, so it can honestly
     reflect whatever uncertainty was found instead of a falsely tidy wrap-up."""
@@ -530,6 +867,8 @@ def synthesize_report(
     sources: list[Source],
     followup_questions: list[str] | None = None,
     options: ResearchOptions | None = None,
+    factors: list[str] | None = None,
+    hypothesis: str = "",
 ) -> str:
     options = options or ResearchOptions()
     model = _resolve_synthesis_model(agent, options.synthesis_model)
@@ -554,13 +893,26 @@ def synthesize_report(
     console.print("[dim]Writing introduction and key findings...[/dim]")
     opening = synthesize_key_findings(agent, model, topic, combined_body)
 
+    hypothesis_block = f"## Hypothesis\n\n{hypothesis}" if hypothesis else ""
+
+    factor_relationships = ""
+    if factors:
+        if options.scientific_mode:
+            console.print(f"[dim]Running scientific assessment across {len(factors)} factor(s)...[/dim]")
+            factor_relationships = synthesize_scientific_assessment(agent, model, topic, hypothesis, factors, sources)
+        else:
+            console.print(f"[dim]Mapping relationships across {len(factors)} factor(s)...[/dim]")
+            factor_relationships = synthesize_factor_relationships(agent, model, topic, factors, combined_body)
+
     console.print("[dim]Checking for contradictions and open questions...[/dim]")
     contradictions = synthesize_contradictions(agent, model, topic, combined_body)
 
     console.print("[dim]Writing conclusion...[/dim]")
     conclusion = synthesize_conclusion(agent, model, topic, combined_body, contradictions)
 
-    return "\n\n".join(p for p in (opening, combined_body, contradictions, conclusion) if p)
+    return "\n\n".join(
+        p for p in (opening, hypothesis_block, factor_relationships, combined_body, contradictions, conclusion) if p
+    )
 
 
 def _slugify(topic: str) -> str:
@@ -653,56 +1005,115 @@ def run_deep_research(agent: Agent, topic: str, options: ResearchOptions | None 
         round_count += 1
 
     followups: list[str] = []
-    if followup_rounds > 0:
-        console.print("[dim]Identifying follow-up angles to dig into...[/dim]")
-        followups = generate_followup_questions(
-            agent, topic, all_sources, n=followup_rounds, quick_model=options.quick_model
-        )
-        for question in followups:
-            if total_chars >= max_corpus_chars or round_count >= max_total_rounds:
-                console.print("[dim]Budget/round cap reached — stopping planned follow-ups early.[/dim]")
-                break
-            console.print(f"[bold]Round {round_count + 1}:[/bold] {question}")
-            _research_round(question)
+    factors: list[str] = []
+    hypothesis = ""
+    factor_analysis = bool(options.factor_analysis)
+    scientific_mode = bool(options.scientific_mode)
 
-    # Adaptive "dig until satisfied" pass — keeps asking what's still
-    # missing and researching it, instead of stopping at a fixed round
-    # count, until the model says nothing important is left or the
-    # safety cap / character budget is hit. Skippable (options.adaptive_digging
-    # = False, e.g. the "quick" preset) for a fast, fixed-round-count run.
-    while adaptive_digging and total_chars < max_corpus_chars and round_count < max_total_rounds:
-        console.print("[dim]Checking whether anything important is still missing...[/dim]")
-        extra_angles = generate_additional_angles(
-            agent, topic, all_sources, covered_angles, quick_model=options.quick_model
-        )
-        if not extra_angles:
-            console.print("[dim]Nothing significant left to dig into — stopping.[/dim]")
-            break
-        for question in extra_angles:
-            if total_chars >= max_corpus_chars or round_count >= max_total_rounds:
+    # Everything that digs for more material is interruptible: Ctrl+C at any
+    # point here drops straight to synthesis with whatever's been gathered
+    # so far, instead of crashing — the actual "stop when I say stop"
+    # mechanism for a run with no real round/budget ceiling (factor_analysis).
+    try:
+        if scientific_mode:
+            hypothesis = generate_hypothesis(agent, topic, all_sources, quick_model=options.quick_model)
+            if hypothesis:
+                console.print(f"[bold]Hypothesis:[/bold] {hypothesis}")
+
+        if followup_rounds > 0:
+            console.print("[dim]Identifying follow-up angles to dig into...[/dim]")
+            followups = generate_followup_questions(
+                agent, topic, all_sources, n=followup_rounds, quick_model=options.quick_model
+            )
+            for question in followups:
+                if total_chars >= max_corpus_chars or round_count >= max_total_rounds:
+                    console.print("[dim]Budget/round cap reached — stopping planned follow-ups early.[/dim]")
+                    break
+                console.print(f"[bold]Round {round_count + 1}:[/bold] {question}")
+                _research_round(question)
+
+        # Adaptive "dig until satisfied" pass — keeps asking what's still
+        # missing and researching it, instead of stopping at a fixed round
+        # count, until the model says nothing important is left or the
+        # safety cap / character budget is hit. Skippable (options.adaptive_digging
+        # = False, e.g. the "quick" preset) for a fast, fixed-round-count run.
+        while adaptive_digging and total_chars < max_corpus_chars and round_count < max_total_rounds:
+            console.print("[dim]Checking whether anything important is still missing...[/dim]")
+            extra_angles = generate_additional_angles(
+                agent, topic, all_sources, covered_angles, quick_model=options.quick_model
+            )
+            if not extra_angles:
+                console.print("[dim]Nothing significant left to dig into — stopping.[/dim]")
                 break
-            console.print(f"[bold]Round {round_count + 1} (adaptive):[/bold] {question}")
-            _research_round(question)
+            for question in extra_angles:
+                if total_chars >= max_corpus_chars or round_count >= max_total_rounds:
+                    break
+                console.print(f"[bold]Round {round_count + 1} (adaptive):[/bold] {question}")
+                _research_round(question)
+
+        # Factor/correlation digging — the "read article, pull out the
+        # factors it depends on, then dig into every relationship between
+        # them" mode. Keeps extracting more factors and researching every
+        # new pair they produce until either extraction genuinely runs dry
+        # (two rounds in a row with nothing new) or the round/budget cap
+        # (effectively unbounded for the "relentless" preset) is hit — so in
+        # practice this only ends via real exhaustion or Ctrl+C.
+        if factor_analysis:
+            asked_pairs = set()
+            dry_rounds = 0
+            while dry_rounds < 2 and total_chars < max_corpus_chars and round_count < max_total_rounds:
+                console.print(f"[dim]Extracting factors ({len(factors)} found so far)...[/dim]")
+                new_factors = extract_factors(agent, topic, all_sources, factors, quick_model=options.quick_model)
+                factors.extend(new_factors)
+                pairs = (
+                    scientific_relationship_questions(topic, factors, asked_pairs)
+                    if scientific_mode
+                    else pairwise_relationship_questions(topic, factors, asked_pairs)
+                )
+                if not new_factors and not pairs:
+                    dry_rounds += 1
+                    continue
+                dry_rounds = 0
+                for key, question in pairs:
+                    if total_chars >= max_corpus_chars or round_count >= max_total_rounds:
+                        break
+                    asked_pairs.add(key)
+                    label = "(evidence)" if scientific_mode else "(correlation)"
+                    console.print(f"[bold]Round {round_count + 1} {label}:[/bold] {question}")
+                    _research_round(question)
+            if factors:
+                console.print(f"[dim]Factor analysis complete — {len(factors)} factor(s), {len(asked_pairs)} question(s) researched.[/dim]")
+    except KeyboardInterrupt:
+        console.print(
+            "\n[yellow]Stopped by user — writing up findings from what's been gathered so far...[/yellow]"
+        )
 
     console.print(
         f"[dim]Read {len(all_sources)} source(s) across {round_count} round(s), "
         f"{total_chars} characters total.[/dim]"
     )
 
-    report = synthesize_report(agent, topic, all_sources, followups, options=options)
+    report = synthesize_report(
+        agent, topic, all_sources, followups, options=options, factors=factors, hypothesis=hypothesis
+    )
     saved_path = save_report(topic, all_sources, report)
 
     console.print(f"\n{report}\n")
     console.print(f"[green]Report saved to:[/green] {saved_path}")
     return ResearchResult(
-        topic=topic, sources=all_sources, followup_questions=followups, report=report, saved_path=saved_path
+        topic=topic, sources=all_sources, followup_questions=followups, report=report,
+        saved_path=saved_path, hypothesis=hypothesis,
     )
 
 
 # --- interactive setup menu, used by `deskbot research` when run from a real
-# terminal with no --mode/--model flags — plain input()/print() to match the
-# style of the persona-create wizard, not the rich-formatted progress output
-# above (that's for a run already in flight; this is picked before it starts).
+# terminal with no --mode/--model flags. Arrow-key selection via questionary
+# when it's installed (the normal case — it's a hard dependency), with a
+# plain numbered-prompt fallback so a missing/broken optional import can
+# never take the whole command down. Every actual prompt goes through the
+# small _choose/_ask_* wrappers below rather than input()/questionary calls
+# inline, so tests can patch just the wrapper and assert on the menu logic
+# (preset selection, option assembly) without needing a real terminal.
 
 def _list_available_models(agent: Agent) -> list[str]:
     try:
@@ -711,67 +1122,122 @@ def _list_available_models(agent: Agent) -> list[str]:
         return []
 
 
-def _ask_int(prompt: str, default: int) -> int:
-    raw = input(f"{prompt} [{default}]: ").strip()
-    if not raw:
-        return default
+def _choose(message: str, options: list[tuple[str, str]], default_index: int = 0) -> str:
+    """options is a list of (value, label) pairs; returns the chosen value."""
+    if questionary is not None:
+        choices = [questionary.Choice(title=label, value=value) for value, label in options]
+        answer = questionary.select(message, choices=choices, default=choices[default_index]).ask()
+        return answer if answer is not None else options[default_index][0]
+    print(f"\n{message}")
+    for i, (_value, label) in enumerate(options, 1):
+        print(f"  {i}) {label}")
+    raw = input("> ").strip()
+    if raw.isdigit() and 1 <= int(raw) <= len(options):
+        return options[int(raw) - 1][0]
+    return options[default_index][0]
+
+
+def _ask_text(message: str, default: str = "") -> str:
+    if questionary is not None:
+        answer = questionary.text(message, default=default).ask()
+        return (answer if answer is not None else default).strip()
+    raw = input(f"{message} [{default}]: ").strip()
+    return raw or default
+
+
+def _ask_confirm(message: str, default: bool) -> bool:
+    if questionary is not None:
+        answer = questionary.confirm(message, default=default).ask()
+        return default if answer is None else answer
+    raw = input(f"{message} (y/n) [{'y' if default else 'n'}]: ").strip().lower()
+    return default if not raw else raw.startswith("y")
+
+
+def _ask_number(message: str, default: int) -> int:
+    raw = _ask_text(message, str(default))
     try:
         return int(raw)
     except ValueError:
-        print(f"Not a number, using default ({default}).")
+        console.print(f"[dim]Not a number, using default ({default}).[/dim]")
         return default
 
 
-def _ask_bool(prompt: str, default: bool) -> bool:
-    raw = input(f"{prompt} (y/n) [{'y' if default else 'n'}]: ").strip().lower()
-    if not raw:
-        return default
-    return raw.startswith("y")
+def _ask_model(message: str, available: list[str]) -> str:
+    """Tab-completion over locally pulled models when questionary supports
+    it; plain free-text entry otherwise (still lets you type any name)."""
+    if questionary is not None and available:
+        answer = questionary.autocomplete(message, choices=available, default="").ask()
+        return (answer or "").strip()
+    return _ask_text(message, "")
+
+
+_MODE_MENU_OPTIONS: list[tuple[str, str]] = [
+    ("quick", f"Quick      — {RESEARCH_MODE_DESCRIPTIONS['quick']}"),
+    ("standard", f"Standard   — {RESEARCH_MODE_DESCRIPTIONS['standard']}"),
+    ("deep", f"Deep       — {RESEARCH_MODE_DESCRIPTIONS['deep']}"),
+    ("relentless", f"Relentless — {RESEARCH_MODE_DESCRIPTIONS['relentless']}"),
+    ("scientist", f"Scientist  — {RESEARCH_MODE_DESCRIPTIONS['scientist']}"),
+    ("custom", "Custom     — configure every setting yourself."),
+]
 
 
 def _prompt_custom_options() -> ResearchOptions:
-    print("\n-- custom research settings --")
+    console.print("\n[bold]-- custom research settings --[/bold]")
+    factor_analysis = _ask_confirm(
+        "Dig into factor relationships/correlations until YOU stop it (Ctrl+C) instead of a round cap?", False
+    )
+    if factor_analysis:
+        console.print(
+            "[dim](factor analysis on: max sources/rounds/budget below are effectively ignored — "
+            "Ctrl+C is the stop.)[/dim]"
+        )
+        scientific_mode = _ask_confirm(
+            "Also use the scientific method — falsifiable hypothesis, actively hunt for "
+            "disconfirming evidence too, rate confidence by source credibility?", False
+        )
+        return ResearchOptions(
+            max_sources=_RELENTLESS_MAX_SOURCES,
+            per_source_chars=_ask_number("Max characters read per source", DEFAULT_PER_SOURCE_CHARS),
+            max_corpus_chars=_RELENTLESS_MAX_CORPUS_CHARS,
+            followup_rounds=_ask_number("Planned follow-up rounds after the overview search", DEFAULT_FOLLOWUP_ROUNDS),
+            max_total_rounds=_RELENTLESS_MAX_TOTAL_ROUNDS,
+            verify_sections=_ask_confirm("Fact-check each section against its own sources?", DEFAULT_VERIFY_SECTIONS),
+            adaptive_digging=True,
+            factor_analysis=True,
+            scientific_mode=scientific_mode,
+        )
     return ResearchOptions(
-        max_sources=_ask_int("Max sources to read (across all rounds)", DEFAULT_MAX_SOURCES),
-        per_source_chars=_ask_int("Max characters read per source", DEFAULT_PER_SOURCE_CHARS),
-        max_corpus_chars=_ask_int("Total character budget for the whole run", DEFAULT_MAX_CORPUS_CHARS),
-        followup_rounds=_ask_int("Planned follow-up rounds after the overview search", DEFAULT_FOLLOWUP_ROUNDS),
-        max_total_rounds=_ask_int("Max total rounds, safety cap (overview + follow-ups + adaptive)", DEFAULT_MAX_TOTAL_ROUNDS),
-        verify_sections=_ask_bool("Fact-check each section against its own sources", DEFAULT_VERIFY_SECTIONS),
-        adaptive_digging=_ask_bool("Keep digging adaptively until nothing important is missing", True),
+        max_sources=_ask_number("Max sources to read (across all rounds)", DEFAULT_MAX_SOURCES),
+        per_source_chars=_ask_number("Max characters read per source", DEFAULT_PER_SOURCE_CHARS),
+        max_corpus_chars=_ask_number("Total character budget for the whole run", DEFAULT_MAX_CORPUS_CHARS),
+        followup_rounds=_ask_number("Planned follow-up rounds after the overview search", DEFAULT_FOLLOWUP_ROUNDS),
+        max_total_rounds=_ask_number(
+            "Max total rounds, safety cap (overview + follow-ups + adaptive)", DEFAULT_MAX_TOTAL_ROUNDS
+        ),
+        verify_sections=_ask_confirm("Fact-check each section against its own sources?", DEFAULT_VERIFY_SECTIONS),
+        adaptive_digging=_ask_confirm("Keep digging adaptively until nothing important is missing?", True),
+        factor_analysis=False,
     )
 
 
 def prompt_research_setup(agent: Agent) -> ResearchOptions:
-    """Interactive menu: pick a depth preset (or go custom), then optionally
-    pick specific models for this one run. Returns a ResearchOptions ready to
-    hand to run_deep_research(); any field the user leaves blank falls back
-    to config.yaml as usual."""
-    print("\n=== deskbot deep research ===")
-    print("Pick a research method:")
-    print(f"  1) Quick    - {RESEARCH_MODE_DESCRIPTIONS['quick']}")
-    print(f"  2) Standard - {RESEARCH_MODE_DESCRIPTIONS['standard']}")
-    print(f"  3) Deep     - {RESEARCH_MODE_DESCRIPTIONS['deep']}")
-    print("  4) Custom   - configure every setting yourself.")
-    choice = input("> ").strip()
+    """Interactive menu: pick a depth preset (or go custom) with arrow keys,
+    then optionally pick specific models for this one run. Returns a
+    ResearchOptions ready to hand to run_deep_research(); any field the user
+    leaves blank falls back to config.yaml as usual."""
+    console.print(Panel("[bold]deskbot deep research[/bold]", expand=False, border_style="cyan"))
+    mode = _choose("Pick a research method:", _MODE_MENU_OPTIONS, default_index=1)
 
-    if choice == "1":
-        options = replace(RESEARCH_MODE_PRESETS["quick"])
-    elif choice == "3":
-        options = replace(RESEARCH_MODE_PRESETS["deep"])
-    elif choice == "4":
-        options = _prompt_custom_options()
-    else:
-        options = replace(RESEARCH_MODE_PRESETS["standard"])
+    options = _prompt_custom_options() if mode == "custom" else replace(RESEARCH_MODE_PRESETS[mode])
 
     available = _list_available_models(agent)
     if available:
-        print(f"\nModels available locally: {', '.join(available)}")
+        console.print(f"\n[dim]Models available locally: {', '.join(available)}[/dim]")
     else:
-        print("\n(Could not reach Ollama to list models — you can still type a name manually.)")
-    print("Pick models for this run, or leave blank to use config.yaml's defaults.")
-    planning = input("  Planning model (proposes follow-up/gap questions) [default]: ").strip()
-    writing = input("  Writing model (drafts sections, fact-checks, writes the report) [same/default]: ").strip()
+        console.print("\n[dim](Could not reach Ollama to list models — you can still type a name manually.)[/dim]")
+    console.print("[dim]Pick models for this run, or leave blank to use config.yaml's defaults.[/dim]")
+    planning = _ask_model("Planning model (proposes follow-up/gap questions):", available)
+    writing = _ask_text("Writing model (drafts sections, fact-checks, writes the report) ['same' to reuse planning]:")
 
     if planning:
         options.quick_model = planning

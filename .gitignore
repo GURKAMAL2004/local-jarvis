@@ -9,3 +9,7 @@ __pycache__/
 *.zip
 Thumbs.db
 .DS_Store
+
+# Never commit the premium-license private key (see deskbot/webui/licensing.py)
+license_private_key*
+*.privkey

@@ -155,6 +155,21 @@ class Agent:
 
     # --- public entry points -------------------------------------------------
 
+    def converse(self, persona_name: str, message: str) -> str:
+        """One turn of persona chat (no tools), using persistent per-persona
+        memory — the non-interactive equivalent of a single input() round
+        trip in chat_repl's loop. Used by the web UI, which has no terminal
+        to loop on; chat_repl itself is left as-is since it also handles the
+        tools-enabled REPL path this doesn't need to duplicate."""
+        persona = load_persona(persona_name)
+        session_id = self.memory.get_or_create_session(persona_name, resume=True)
+        self.memory.add_message(session_id, "user", message)
+        messages = self._history_as_messages(persona, session_id)
+        model = self.config.resolved_tier.text_model
+        reply = self._stream_reply(model, messages)
+        self.memory.add_message(session_id, "assistant", reply)
+        return reply
+
     def chat_repl(self, persona_name: str, tools_enabled: bool = False) -> None:
         persona = load_persona(persona_name)
         session_id = self.memory.get_or_create_session(persona_name, resume=True)

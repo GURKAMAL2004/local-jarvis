@@ -1,0 +1,186 @@
+<title>deskbot</title>
+<link rel="stylesheet" href="/static/style.css">
+
+<div id="app">
+  <nav class="sidebar">
+    <div>
+      <div class="brand">deskbot</div>
+      <div class="brand-sub">your own AI, on your own machine</div>
+    </div>
+    <button class="nav-btn active" data-view="home"><span class="nav-icon">&#9670;</span> Home</button>
+    <button class="nav-btn" data-view="chat"><span class="nav-icon">&#9993;</span> Chat</button>
+    <button class="nav-btn" data-view="research"><span class="nav-icon">&#128301;</span> Deep Research</button>
+    <button class="nav-btn" data-view="chess"><span class="nav-icon">&#9819;</span> Chess</button>
+    <button class="nav-btn" data-view="routines"><span class="nav-icon">&#9881;</span> Routines</button>
+    <button class="nav-btn" data-view="premium"><span class="nav-icon">&#9733;</span> Premium</button>
+    <div class="sidebar-footer">
+      Running fully local via Ollama.
+      <div id="premium-badge"></div>
+    </div>
+  </nav>
+
+  <main>
+    <!-- HOME -->
+    <section class="view active" id="view-home">
+      <h1>Welcome back.</h1>
+      <p class="lede">Pick something to do. Everything here runs on your own machine — nothing leaves your computer.</p>
+      <div class="tile-grid">
+        <button class="tile" data-goto="chat">
+          <span class="tile-icon">&#9993;</span>
+          <h4>Chat</h4>
+          <p>Have a plain conversation with your assistant.</p>
+        </button>
+        <button class="tile" data-goto="research">
+          <span class="tile-icon">&#128301;</span>
+          <h4>Deep Research</h4>
+          <p>Give it a topic. It reads the web and writes you a report.</p>
+        </button>
+        <button class="tile" data-goto="chess">
+          <span class="tile-icon">&#9819;</span>
+          <h4>Chess</h4>
+          <p>Play a game against your local AI.</p>
+        </button>
+        <button class="tile" data-goto="routines">
+          <span class="tile-icon">&#9881;</span>
+          <h4>Routines</h4>
+          <p>Replay tasks you've taught it before.</p>
+        </button>
+        <button class="tile" data-goto="premium">
+          <span class="tile-icon">&#9733;</span>
+          <h4>Premium</h4>
+          <p>Support development and unlock premium.</p>
+        </button>
+      </div>
+    </section>
+
+    <!-- CHAT -->
+    <section class="view" id="view-chat">
+      <h1>Chat</h1>
+      <p class="lede">A plain conversation — no tools, no browsing, just talking.</p>
+      <div class="card">
+        <label for="chat-persona">Persona</label>
+        <select id="chat-persona"></select>
+        <div id="chat-log" class="chat-log"></div>
+        <div class="chat-input-row">
+          <input type="text" id="chat-input" placeholder="Type a message and press Enter...">
+          <button id="chat-send">Send</button>
+        </div>
+      </div>
+    </section>
+
+    <!-- RESEARCH -->
+    <section class="view" id="view-research">
+      <h1>Deep Research</h1>
+      <p class="lede">Give it a topic. It searches the web, reads real sources, and writes a report — the deeper modes actively hunt for evidence, not just a quick summary.</p>
+      <div class="card">
+        <label for="research-topic">What do you want to research?</label>
+        <input type="text" id="research-topic" placeholder="e.g. does creatine improve cognitive performance">
+
+        <label for="research-mode">Depth</label>
+        <select id="research-mode">
+          <option value="quick">Quick — single search, fastest</option>
+          <option value="standard" selected>Standard — follow-ups + fact-check</option>
+          <option value="deep">Deep — more sources, thorough</option>
+          <option value="relentless">Relentless — digs until you stop it</option>
+          <option value="scientist">Scientist — hypothesis + evidence-vs-counter-evidence</option>
+        </select>
+
+        <details class="advanced">
+          <summary>Advanced: choose specific models</summary>
+          <div class="card">
+            <label for="research-quick-model">Planning model (optional)</label>
+            <input type="text" id="research-quick-model" placeholder="leave blank to use config default">
+            <label for="research-synthesis-model">Writing model (optional)</label>
+            <input type="text" id="research-synthesis-model" placeholder="leave blank to use config default">
+          </div>
+        </details>
+
+        <button id="research-start">Start researching</button>
+        <button id="research-stop" class="danger" style="display:none">Stop &amp; write up what's found</button>
+      </div>
+
+      <div class="card" id="research-progress-card" style="display:none">
+        <h3>Progress</h3>
+        <div class="console" id="research-console"></div>
+        <div class="status-line" id="research-status"></div>
+      </div>
+
+      <div class="card" id="research-report-card" style="display:none">
+        <h3>Report</h3>
+        <div class="report" id="research-report"></div>
+      </div>
+    </section>
+
+    <!-- CHESS -->
+    <section class="view" id="view-chess">
+      <h1>Chess</h1>
+      <p class="lede">Play against your local AI. Legality is always enforced by code — it can never make an illegal move.</p>
+      <div class="card">
+        <label for="chess-color">Play as</label>
+        <select id="chess-color">
+          <option value="white" selected>White</option>
+          <option value="black">Black</option>
+        </select>
+        <button id="chess-new">New game</button>
+        <p class="status-line" id="chess-status"></p>
+        <div class="chessboard" id="chessboard"></div>
+        <p class="field-hint" id="chess-hint">Click a piece, then click where to move it.</p>
+      </div>
+    </section>
+
+    <!-- ROUTINES -->
+    <section class="view" id="view-routines">
+      <h1>Routines</h1>
+      <p class="lede">Tasks you've taught deskbot before (via <code>deskbot teach</code>), ready to replay.</p>
+      <div class="card" id="routines-list">
+        <p class="status-line">Loading...</p>
+      </div>
+      <div class="card" id="routines-progress-card" style="display:none">
+        <h3>Progress</h3>
+        <div class="console" id="routines-console"></div>
+      </div>
+    </section>
+
+    <!-- PREMIUM -->
+    <section class="view" id="view-premium">
+      <h1>Premium</h1>
+      <p class="lede">deskbot is free and runs entirely on your machine. If it's been useful, supporting development gets you the premium tier and keeps new features coming.</p>
+
+      <div class="card">
+        <h3>Support development</h3>
+        <div class="wallet-box">
+          <div class="wallet-qr"><img id="wallet-qr-img" alt="Wallet QR code"></div>
+          <div style="flex:1; min-width:260px">
+            <div class="steps">
+              <ol>
+                <li>Send your support to the address below (any amount, any EVM-compatible chain).</li>
+                <li>Email your transaction ID to <span id="wallet-email"></span> along with the email you'd like your unlock code sent to.</li>
+                <li>You'll receive a personal unlock code by email — enter it below.</li>
+              </ol>
+            </div>
+            <div class="wallet-address" id="wallet-address"></div>
+          </div>
+        </div>
+        <div class="notice" style="margin-top:1.25rem">
+          Since deskbot runs entirely on your own machine with no server, there's no way for it to automatically
+          detect a payment — that confirmation happens by email. What <em>is</em> real: unlock codes are
+          cryptographically signed and can't be guessed or faked, even though this app is open source.
+        </div>
+      </div>
+
+      <div class="card">
+        <h3>Unlock premium</h3>
+        <p class="status-line" id="premium-status">Checking status...</p>
+        <label for="premium-email">Your email</label>
+        <input type="email" id="premium-email" placeholder="the email you received your code at">
+        <label for="premium-code">Unlock code</label>
+        <input type="text" id="premium-code" placeholder="paste your code here">
+        <button id="premium-unlock">Unlock</button>
+      </div>
+    </section>
+  </main>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script src="/static/app.js"></script>

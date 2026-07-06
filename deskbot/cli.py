@@ -13,6 +13,7 @@
     deskbot routines delete <name> delete a routine
     deskbot schedule <name> <cron> register a routine with Windows Task Scheduler
     deskbot chess [--color white|black]  play chess against the local model
+    deskbot ui [--port N]         launch the local web interface
     deskbot doctor                environment diagnostics
 """
 
@@ -47,7 +48,7 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     research_p.add_argument("topic", nargs="?", default=None, help="Topic to research (omit to be prompted)")
     research_p.add_argument(
-        "--mode", choices=["quick", "standard", "deep"], default=None,
+        "--mode", choices=["quick", "standard", "deep", "relentless", "scientist"], default=None,
         help="Research depth preset. Default: interactive menu (or 'standard' with --no-menu).",
     )
     research_p.add_argument(
@@ -90,6 +91,10 @@ def _build_parser() -> argparse.ArgumentParser:
 
     chess_p = sub.add_parser("chess", help="Play chess against the local model in the terminal")
     chess_p.add_argument("--color", choices=["white", "black"], default="white", help="Which side you play")
+
+    ui_p = sub.add_parser("ui", help="Launch the local web interface")
+    ui_p.add_argument("--port", type=int, default=8420, help="Port to serve on (default: 8420)")
+    ui_p.add_argument("--no-browser", action="store_true", help="Don't automatically open a browser tab")
 
     sub.add_parser("doctor", help="Diagnose the local environment")
 
@@ -316,6 +321,21 @@ def main(argv: list[str] | None = None) -> int:
 
         agent = Agent(config)
         play_chess(agent, human_color=args.color)
+        return 0
+
+    if args.command == "ui":
+        import threading
+        import webbrowser
+
+        import uvicorn
+
+        from deskbot.webui.server import create_app
+
+        url = f"http://127.0.0.1:{args.port}"
+        console.print(f"[bold]deskbot web UI:[/bold] {url}")
+        if not args.no_browser:
+            threading.Timer(1.0, lambda: webbrowser.open(url)).start()
+        uvicorn.run(create_app(config), host="127.0.0.1", port=args.port, log_level="warning")
         return 0
 
     if args.command == "doctor":

@@ -1,13 +1,34 @@
-# deskbot — local Jarvis-style CLI agent
+# deskbot — a local Jarvis, running entirely on your own machine
 
-A local-first agent that runs entirely on your own machine: a local LLM (via
-[Ollama](https://ollama.com)) as the brain, and a tool layer as the hands.
-Built in strict phases — each phase ships working, tested functionality
-before the next begins.
+A private AI agent for Windows that runs 100% locally via [Ollama](https://ollama.com)
+— no cloud, no API keys, no subscription, nothing you type ever leaves your
+computer. It can chat, research a topic like a scientist, run real browser/shell
+automation, teach itself routines, play chess, and now has a full web
+interface anyone can use — not just people comfortable with a terminal.
 
-**Status: Phase 1 (Core), Phase 2 (Hands), and Phase 3 (Routines) complete.**
-Phases 4–5 (screen vision & game automation, WhatsApp customer chat) are not
-implemented yet — see [Roadmap](#roadmap) below for what's coming.
+**Status: Phase 1 (Core), Phase 2 (Hands), and Phase 3 (Routines) complete,**
+plus deep research, chess, and a web UI built on top. Phases 4–5 (screen
+vision & game automation, WhatsApp customer chat) are not implemented yet —
+see [Roadmap](#roadmap) below for what's coming.
+
+## Quick Start (2 minutes, no coding required)
+
+1. Install [Ollama](https://ollama.com) (it'll prompt you to pull a model the
+   first time) and [Python 3.11+](https://www.python.org/downloads/) if you
+   don't already have them.
+2. Download this repo (green **Code → Download ZIP** button above, or
+   `git clone`) and unzip it anywhere.
+3. Right-click **`install.ps1`** → **Run with PowerShell** (or open a
+   terminal in the folder and run
+   `powershell -ExecutionPolicy Bypass -File .\install.ps1`). This detects
+   your RAM, pulls the right-sized model, and installs everything.
+4. Double-click **`Deskbot UI.bat`** — a browser tab opens with the full
+   interface: chat, deep research, chess, routines. That's it, no command
+   line needed from here on.
+
+Prefer the terminal? `deskbot` for the interactive REPL, `deskbot research
+"<topic>"` for deep research, `deskbot chess` to play — see [Usage](#usage)
+below for the complete command list.
 
 ## What works right now
 
@@ -117,17 +138,26 @@ deskbot do "open edge, search for insulated bottle vacuum physics, open the two 
 
 # Deep, multi-round research — NOT a single search. See "Deep research architecture" below.
 deskbot research "wifi vs ethernet speed"
-# Run from a real terminal with no flags and you'll get an interactive menu:
-# pick a depth (Quick/Standard/Deep/Custom) and, optionally, which locally
-# pulled Ollama model(s) to use for this one run. Press Enter on any question
-# to keep the sensible default. Non-interactive callers (scripts, `deskbot
-# run`, scheduled tasks) skip the menu automatically.
+# Run from a real terminal with no flags and you'll get an interactive
+# arrow-key menu (Quick/Standard/Deep/Relentless/Scientist/Custom) and,
+# optionally, which locally pulled Ollama model(s) to use for this one run.
+# Press Enter on any question to keep the sensible default. Non-interactive
+# callers (scripts, `deskbot run`, scheduled tasks) skip the menu automatically.
 # Also runnable by a non-technical user: double-click "Deep Research.bat" (also
 # copied to the Desktop), type a topic when prompted, and the report opens itself.
 
 # Skip the menu and control everything via flags instead:
 deskbot research "wifi vs ethernet speed" --mode deep
 deskbot research "wifi vs ethernet speed" --no-menu --quick-model qwen2.5:1.5b-instruct-q4_K_M --synthesis-model qwen2.5:14b-instruct-q4_K_M
+
+# Relentless: extracts factors, digs into every relationship between them,
+# and never stops on its own — press Ctrl+C whenever you're satisfied.
+deskbot research "what actually determines a country's inflation rate" --mode relentless
+
+# Scientist: same as Relentless, but forms a falsifiable hypothesis first,
+# actively hunts for evidence that would DISPROVE each relationship (not
+# just confirm it), and rates confidence by source credibility.
+deskbot research "does creatine improve cognitive performance" --mode scientist
 
 # Create a new persona interactively
 deskbot persona create
@@ -155,9 +185,73 @@ deskbot schedule open-notepad "30 9 * * *"
 deskbot chess
 deskbot chess --color black
 
+# Launch the local web interface (chat, research, chess, routines, premium)
+deskbot ui
+deskbot ui --port 9000 --no-browser
+
 # Diagnose your environment (Ollama up? model pulled? Playwright/browser ok?)
 deskbot doctor
 ```
+
+## Web UI
+
+`deskbot ui` (or double-click **`Deskbot UI.bat`** / the Desktop shortcut)
+starts a local web server on `127.0.0.1` and opens it in your browser — a
+proper interface over the same features the CLI has, designed to be usable
+by someone who's never touched a terminal, while staying dense enough for a
+developer to actually get work done in.
+
+- **Chat** — plain persona conversation (same `Agent.converse`/memory the
+  CLI's `deskbot chat` uses, so history is shared and persists).
+- **Deep Research** — pick a topic and a depth (Quick/Standard/Deep/
+  Relentless/Scientist), watch it work in a live console panel, read the
+  finished report, or hit Stop at any point — the Relentless/Scientist modes
+  don't stop on their own by design, so this is the actual Ctrl+C for them.
+  An "Advanced" section lets you pick specific planning/writing models.
+- **Chess** — a real clickable board (legality is still 100% code-driven,
+  same as the terminal version — see `chess_game.py`).
+- **Routines** — list and run anything already taught via `deskbot teach`,
+  with live output.
+- **Premium** — see below.
+
+Research and routine runs go through the same `deskbot research`/
+`deskbot run` subcommands as real subprocesses (streamed to the browser over
+SSE), not reimplementations — stopping one from the browser sends a real
+`CTRL_BREAK_EVENT`/`SIGINT` to that process, so it hits the exact same
+graceful-shutdown code path as pressing Ctrl+C in a terminal. Chat and chess
+run in-process directly against `Agent`/`chess_game.py` since they're fast,
+turn-based interactions with no need for subprocess isolation.
+
+**Design:** a deliberately restrained "old money" palette (deep forest
+green, aged gold, ivory, serif type) instead of a typical flat SaaS-app
+look, no external fonts/CDNs (works fully offline like the rest of deskbot),
+and a large base font size + big tap targets so it's comfortable for someone
+who isn't especially computer-literate, not just someone who wants dense
+developer tooling.
+
+### Premium
+
+deskbot itself is free and stays fully local — there's no subscription
+required to use any of it. The Premium panel exists for anyone who wants to
+support development directly: it shows a wallet address (and QR code) to
+send crypto to, and an unlock-code field.
+
+Being honest about what this actually is: deskbot has no backend server, so
+there is no way for the app to automatically detect that a payment
+happened — that confirmation is manual (you check the wallet, then email a
+code to whoever paid). What *is* real is the code itself: unlock codes are
+Ed25519 signatures over the buyer's email (`deskbot/webui/licensing.py`
+ships only the **public** key), so even though this is open-source code,
+nobody can mint a valid code without the matching **private** key — the
+same trust model real commercial license keys use. To issue a code after
+confirming a payment yourself:
+
+```bash
+python -m deskbot.webui.generate_license <email> <base64-private-key>
+```
+
+The private key is never committed to this repo (see `.gitignore`) — keep
+it somewhere safe, not in the project folder.
 
 ### A note on tool-calling model quality
 
@@ -223,9 +317,43 @@ anything. What it does instead:
    opens the report; the conclusion is written **last**, after contradictions
    are known, so it can honestly reflect whatever uncertainty was found
    instead of a falsely tidy wrap-up.
-8. The report is saved as Markdown to your **Desktop, in a `deskbot-research`
-   folder** (falls back to `~/.deskbot/research_reports` if the Desktop write
-   ever fails) and opened automatically.
+8. **Factor/correlation digging** (opt-in — `ResearchOptions.factor_analysis`,
+   on for the **Relentless** and **Scientist** presets): once everything
+   above finishes, deskbot extracts the concrete factors/variables the topic
+   actually depends on (e.g. for "coffee and heart health": caffeine dose,
+   genetics, existing conditions, timing) and researches the relationship
+   between **every pair** of them — pure combinatorics (`K` factors →
+   `K·(K-1)/2` pairs), not left to the model to think to compare things on
+   its own — pulling in more factors as it goes. A "Factors & Correlations"
+   section in the report maps out what was actually found. This phase only
+   ends on genuine exhaustion (two rounds in a row finding nothing new) or
+   **you pressing Ctrl+C** — digging is interruptible at any point, and
+   Ctrl+C always drops straight to writing up whatever's been gathered
+   rather than crashing.
+9. **Scientific mode** (opt-in — `ResearchOptions.scientific_mode`, implies
+   factor_analysis, on for the **Scientist** preset): the difference between
+   "a report" and actually thinking like a scientist.
+   - **Hypothesis first:** before digging, `generate_hypothesis` states one
+     clear, falsifiable claim worth testing — not just "research the topic."
+   - **Actively hunts for disconfirmation:** each factor pair gets **two**
+     research questions instead of one (`scientific_relationship_questions`)
+     — one seeking evidence that *supports* the relationship, one seeking
+     evidence that *contradicts* it. A real scientist tries to falsify their
+     own hypothesis rather than only collecting support for it.
+   - **Credibility-weighted confidence:** every source is tagged with a
+     code-computed credibility tier (`_score_credibility` — `.gov`/`.edu`/
+     known journals (PubMed, Nature, NEJM, Cochrane, ...) = high, reputable
+     news/health sites = medium, everything else = low; never model-judged,
+     for the same reliability reason the domain blocklist is code-driven).
+     `synthesize_scientific_assessment` then rates each relationship's
+     evidence strength (Strong / Moderate / Weak / Conflicting /
+     Insufficient) weighted by that credibility, explicitly flags
+     correlation-without-causation, and lists confounding variables — a
+     "## Scientific Assessment" section replaces the plain "Factors &
+     Correlations" one, and a "## Hypothesis" section opens the report.
+10. The report is saved as Markdown to your **Desktop, in a `deskbot-research`
+    folder** (falls back to `~/.deskbot/research_reports` if the Desktop write
+    ever fails) and opened automatically.
 
 **Two-model setup** (`research.quick_model` / `research.deep_model` in
 config, or per-run via the menu / `--quick-model` / `--synthesis-model`):
@@ -239,17 +367,26 @@ bigger model more than any other step, so it gets used everywhere writing
 actually happens.
 
 **Depth presets and the setup menu:** running `deskbot research "<topic>"`
-from a real terminal with no flags shows a menu — pick **Quick** (single
-broad search, no follow-ups, no fact-check), **Standard** (the pipeline
-above, config defaults), **Deep** (more sources/rounds, thorough fact-check),
-or **Custom** (prompts for every setting individually: max sources, character
-budgets, follow-up/total round counts, fact-check on/off, adaptive digging
-on/off). It then offers to pick a planning model and a writing model from
-whatever's currently pulled in Ollama (type `same` for the writing model to
-reuse the planning model) — leave either blank to keep config.yaml's value.
-Skip the menu entirely with `--mode {quick,standard,deep}`, `--no-menu`,
-`--quick-model <name>`, or `--synthesis-model <name>`; non-interactive
-callers (routines, `deskbot schedule`, anything without a real stdin) skip
+from a real terminal with no flags shows an arrow-key menu (via `questionary`)
+— pick **Quick** (single broad search, no follow-ups, no fact-check),
+**Standard** (the pipeline above, config defaults), **Deep** (more
+sources/rounds, thorough fact-check), **Relentless** (factor/correlation
+digging, step 8 above, with round/budget ceilings set so high they're not
+the practical limit — Ctrl+C is), **Scientist** (Relentless plus the
+hypothesis-driven, disconfirmation-seeking, credibility-weighted mode from
+step 9), or **Custom** (prompts for every setting individually: max sources,
+character budgets, follow-up/total round counts, fact-check on/off, adaptive
+digging on/off, factor/correlation digging on/off, and — if that's on —
+scientific mode on/off; saying yes to factor/correlation digging switches
+the round/budget fields to the same effectively-unbounded ceilings Relentless
+uses). It then offers to pick a planning model and a writing model from
+whatever's currently pulled in Ollama, with tab-autocomplete over them (type
+`same` for the writing model to reuse the planning model) — leave either
+blank to keep config.yaml's value. If `questionary` is ever unavailable, the
+menu falls back to a plain numbered prompt automatically rather than crashing.
+Skip the menu entirely with `--mode {quick,standard,deep,relentless,scientist}`,
+`--no-menu`, `--quick-model <name>`, or `--synthesis-model <name>`;
+non-interactive callers (routines, `deskbot schedule`, anything without a real stdin) skip
 the menu automatically so they never hang waiting for input.
 
 **Character budget:** `research.max_corpus_chars` (default 80,000, or the
@@ -434,6 +571,12 @@ deskbot/            the installable Python package
   scheduler.py       `deskbot schedule` — cron subset -> Windows Task Scheduler
   research.py        `deskbot research` — multi-round search/scrape/map-reduce-synthesize pipeline
   chess_game.py      `deskbot chess` — terminal chess vs. the local model (legality is code-driven)
+  webui/             `deskbot ui` — local web interface
+    server.py          FastAPI app: chat/research/chess/routines/premium routes
+    jobs.py            subprocess-based streaming runner for research/routine jobs
+    licensing.py       premium unlock-code verification (public key only)
+    generate_license.py  developer-only: mints unlock codes (needs the private key)
+    static/            index.html, style.css, app.js — no build step, no CDN deps
   defaults/          packaged defaults copied into ~/.deskbot on first run
 tests/               pytest smoke suite (isolated from your real ~/.deskbot)
 game_profiles/       (Phase 4) — empty for now
@@ -441,4 +584,10 @@ install.ps1          Windows installer (primary)
 install.sh           Linux/macOS installer (secondary)
 Deep Research.bat    non-technical launcher — prompts for a topic, runs deskbot research
                      (also copied to your Desktop by default)
+Deskbot UI.bat       non-technical launcher — starts `deskbot ui` and opens your browser
+                     (also copied to your Desktop by default)
 ```
+
+## License
+
+MIT — see [LICENSE](LICENSE). Use it, fork it, ship your own version of it.

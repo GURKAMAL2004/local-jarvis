@@ -1,0 +1,512 @@
+/* deskbot — "old money" design system: deep forest green, aged gold, ivory,
+   serif type. No external fonts/CDNs — everything here works fully offline,
+   matching the rest of deskbot. Base sizes are deliberately generous (18px+
+   body, 48px+ tap targets) so this is comfortable for someone who has never
+   used a computer much, while staying dense enough for a power user. */
+
+:root {
+  --bg: #0f1a15;
+  --bg-panel: #162720;
+  --bg-panel-elevated: #1d3128;
+  --border-gold: rgba(201, 162, 92, 0.32);
+  --border-gold-strong: rgba(201, 162, 92, 0.55);
+  --gold: #c9a25c;
+  --gold-bright: #e3c07f;
+  --ivory: #f3ecdd;
+  --taupe: #a99d86;
+  --sage: #8caf8f;
+  --terracotta: #c17a5f;
+  --navy: #16233a;
+
+  --font-serif: Georgia, "Iowan Old Style", "Palatino Linotype", "Book Antiqua", serif;
+  --font-mono: Consolas, "Courier New", monospace;
+
+  --radius: 6px;
+  --gap: 1.25rem;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html {
+  font-size: 18px;
+}
+
+body {
+  margin: 0;
+  min-height: 100vh;
+  background: var(--bg);
+  background-image:
+    radial-gradient(ellipse at top left, rgba(201, 162, 92, 0.05), transparent 45%),
+    radial-gradient(ellipse at bottom right, rgba(140, 175, 143, 0.04), transparent 50%);
+  color: var(--ivory);
+  font-family: var(--font-serif);
+  line-height: 1.55;
+}
+
+h1, h2, h3, h4 {
+  font-family: var(--font-serif);
+  font-weight: 600;
+  letter-spacing: 0.01em;
+  color: var(--gold-bright);
+  margin: 0 0 0.6em 0;
+}
+
+a {
+  color: var(--gold-bright);
+}
+
+#app {
+  display: grid;
+  grid-template-columns: 260px 1fr;
+  min-height: 100vh;
+}
+
+/* --- sidebar --- */
+
+.sidebar {
+  background: linear-gradient(180deg, var(--bg-panel), var(--bg));
+  border-right: 1px solid var(--border-gold);
+  padding: 1.75rem 1.25rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+}
+
+.brand {
+  font-size: 1.6rem;
+  color: var(--gold-bright);
+  margin: 0 0 0.15rem 0;
+  letter-spacing: 0.03em;
+}
+
+.brand-sub {
+  color: var(--taupe);
+  font-size: 0.85rem;
+  margin-bottom: 1.75rem;
+  font-style: italic;
+}
+
+.nav-btn {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  width: 100%;
+  min-height: 52px;
+  padding: 0.6rem 1rem;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: var(--radius);
+  color: var(--ivory);
+  font-family: var(--font-serif);
+  font-size: 1.05rem;
+  text-align: left;
+  cursor: pointer;
+  transition: background 0.15s ease, border-color 0.15s ease;
+}
+
+.nav-btn:hover {
+  background: var(--bg-panel-elevated);
+  border-color: var(--border-gold);
+}
+
+.nav-btn.active {
+  background: var(--bg-panel-elevated);
+  border-color: var(--border-gold-strong);
+  color: var(--gold-bright);
+}
+
+.nav-icon {
+  font-size: 1.2rem;
+  width: 1.4rem;
+  text-align: center;
+}
+
+.sidebar-footer {
+  margin-top: auto;
+  padding-top: 1rem;
+  border-top: 1px solid var(--border-gold);
+  font-size: 0.85rem;
+  color: var(--taupe);
+}
+
+.premium-badge {
+  display: inline-block;
+  margin-top: 0.5rem;
+  padding: 0.25rem 0.65rem;
+  border: 1px solid var(--border-gold-strong);
+  border-radius: 999px;
+  color: var(--gold-bright);
+  font-size: 0.8rem;
+  letter-spacing: 0.05em;
+}
+
+/* --- main content --- */
+
+main {
+  padding: 2.5rem 3rem;
+  max-width: 980px;
+}
+
+.view {
+  display: none;
+}
+
+.view.active {
+  display: block;
+}
+
+.card {
+  background: var(--bg-panel);
+  border: 1px solid var(--border-gold);
+  border-radius: var(--radius);
+  padding: 1.75rem;
+  margin-bottom: var(--gap);
+}
+
+.card h3 {
+  margin-top: 0;
+}
+
+.lede {
+  color: var(--taupe);
+  font-size: 1.05rem;
+  margin-bottom: 2rem;
+}
+
+/* --- home tiles --- */
+
+.tile-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  gap: var(--gap);
+}
+
+.tile {
+  background: var(--bg-panel);
+  border: 1px solid var(--border-gold);
+  border-radius: var(--radius);
+  padding: 1.75rem 1.5rem;
+  cursor: pointer;
+  text-align: left;
+  color: var(--ivory);
+  font-family: var(--font-serif);
+  transition: transform 0.12s ease, border-color 0.12s ease, background 0.12s ease;
+}
+
+.tile:hover {
+  border-color: var(--border-gold-strong);
+  background: var(--bg-panel-elevated);
+  transform: translateY(-2px);
+}
+
+.tile .tile-icon {
+  font-size: 2rem;
+  margin-bottom: 0.75rem;
+  display: block;
+}
+
+.tile h4 {
+  margin: 0 0 0.4rem 0;
+  color: var(--gold-bright);
+  font-size: 1.2rem;
+}
+
+.tile p {
+  margin: 0;
+  color: var(--taupe);
+  font-size: 0.95rem;
+}
+
+/* --- form controls --- */
+
+label {
+  display: block;
+  margin-bottom: 0.4rem;
+  color: var(--taupe);
+  font-size: 0.95rem;
+}
+
+input[type="text"], input[type="email"], select, textarea {
+  width: 100%;
+  min-height: 48px;
+  padding: 0.6rem 0.9rem;
+  background: var(--bg);
+  border: 1px solid var(--border-gold);
+  border-radius: var(--radius);
+  color: var(--ivory);
+  font-family: var(--font-serif);
+  font-size: 1.05rem;
+  margin-bottom: 1.1rem;
+}
+
+textarea {
+  min-height: 90px;
+  resize: vertical;
+}
+
+input:focus, select:focus, textarea:focus {
+  outline: none;
+  border-color: var(--gold);
+}
+
+.field-hint {
+  margin-top: -0.85rem;
+  margin-bottom: 1.1rem;
+  color: var(--taupe);
+  font-size: 0.85rem;
+}
+
+button, .btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 48px;
+  padding: 0.6rem 1.5rem;
+  background: transparent;
+  border: 1px solid var(--border-gold-strong);
+  border-radius: var(--radius);
+  color: var(--gold-bright);
+  font-family: var(--font-serif);
+  font-size: 1.05rem;
+  cursor: pointer;
+  transition: background 0.15s ease, color 0.15s ease;
+}
+
+button:hover:not(:disabled) {
+  background: var(--gold);
+  color: var(--bg);
+}
+
+button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+button.secondary {
+  border-color: var(--border-gold);
+  color: var(--ivory);
+}
+
+button.danger {
+  border-color: var(--terracotta);
+  color: var(--terracotta);
+}
+
+button.danger:hover:not(:disabled) {
+  background: var(--terracotta);
+  color: var(--bg);
+}
+
+details.advanced {
+  margin: -0.5rem 0 1.25rem 0;
+}
+
+details.advanced summary {
+  cursor: pointer;
+  color: var(--taupe);
+  font-size: 0.95rem;
+}
+
+details.advanced .card {
+  margin-top: 1rem;
+  background: var(--bg);
+}
+
+/* --- log / console panel --- */
+
+.console {
+  background: #0a1310;
+  border: 1px solid var(--border-gold);
+  border-radius: var(--radius);
+  padding: 1rem 1.25rem;
+  font-family: var(--font-mono);
+  font-size: 0.9rem;
+  color: #cfe8d4;
+  height: 320px;
+  overflow-y: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.report {
+  background: var(--bg);
+  border: 1px solid var(--border-gold);
+  border-radius: var(--radius);
+  padding: 1.5rem 1.75rem;
+  white-space: pre-wrap;
+  line-height: 1.7;
+}
+
+.status-line {
+  color: var(--taupe);
+  font-size: 0.95rem;
+  margin: 0.75rem 0;
+}
+
+/* --- chat --- */
+
+.chat-log {
+  display: flex;
+  flex-direction: column;
+  gap: 0.9rem;
+  margin-bottom: 1.25rem;
+  max-height: 480px;
+  overflow-y: auto;
+  padding-right: 0.25rem;
+}
+
+.chat-bubble {
+  max-width: 80%;
+  padding: 0.75rem 1.1rem;
+  border-radius: var(--radius);
+  line-height: 1.5;
+}
+
+.chat-bubble.user {
+  align-self: flex-end;
+  background: var(--navy);
+  border: 1px solid var(--border-gold);
+}
+
+.chat-bubble.assistant {
+  align-self: flex-start;
+  background: var(--bg-panel-elevated);
+  border: 1px solid var(--border-gold);
+}
+
+.chat-input-row {
+  display: flex;
+  gap: 0.75rem;
+}
+
+.chat-input-row input {
+  margin-bottom: 0;
+}
+
+/* --- chess board --- */
+
+.chessboard {
+  display: grid;
+  grid-template-columns: repeat(8, 56px);
+  grid-template-rows: repeat(8, 56px);
+  border: 2px solid var(--border-gold-strong);
+  width: max-content;
+  margin-bottom: 1.25rem;
+}
+
+.chess-square {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 1.8rem;
+  font-family: var(--font-serif);
+  cursor: pointer;
+  user-select: none;
+}
+
+.chess-square.light {
+  background: #e8ddc4;
+  color: #16241d;
+}
+
+.chess-square.dark {
+  background: #4a5c47;
+  color: #f3ecdd;
+}
+
+.chess-square.selected {
+  outline: 3px solid var(--gold);
+  outline-offset: -3px;
+}
+
+/* --- premium panel --- */
+
+.wallet-box {
+  display: flex;
+  gap: 2rem;
+  align-items: flex-start;
+  flex-wrap: wrap;
+}
+
+.wallet-qr {
+  background: var(--ivory);
+  padding: 0.75rem;
+  border-radius: var(--radius);
+}
+
+.wallet-qr img {
+  display: block;
+  width: 180px;
+  height: 180px;
+}
+
+.wallet-address {
+  font-family: var(--font-mono);
+  background: var(--bg);
+  border: 1px solid var(--border-gold);
+  border-radius: var(--radius);
+  padding: 0.75rem 1rem;
+  word-break: break-all;
+  color: var(--gold-bright);
+}
+
+.steps ol {
+  padding-left: 1.25rem;
+}
+
+.steps li {
+  margin-bottom: 0.5rem;
+}
+
+.notice {
+  border-left: 3px solid var(--gold);
+  padding: 0.75rem 1rem;
+  background: rgba(201, 162, 92, 0.08);
+  border-radius: 0 var(--radius) var(--radius) 0;
+  color: var(--taupe);
+  font-size: 0.95rem;
+}
+
+.toast {
+  position: fixed;
+  bottom: 1.5rem;
+  right: 1.5rem;
+  padding: 0.85rem 1.4rem;
+  background: var(--bg-panel-elevated);
+  border: 1px solid var(--border-gold-strong);
+  border-radius: var(--radius);
+  color: var(--ivory);
+  box-shadow: 0 6px 24px rgba(0,0,0,0.4);
+  opacity: 0;
+  transform: translateY(10px);
+  transition: opacity 0.2s ease, transform 0.2s ease;
+  pointer-events: none;
+  z-index: 100;
+}
+
+.toast.show {
+  opacity: 1;
+  transform: translateY(0);
+}
+
+.toast.error {
+  border-color: var(--terracotta);
+  color: var(--terracotta);
+}
+
+@media (max-width: 800px) {
+  #app {
+    grid-template-columns: 1fr;
+  }
+  .sidebar {
+    flex-direction: row;
+    overflow-x: auto;
+    border-right: none;
+    border-bottom: 1px solid var(--border-gold);
+  }
+  main {
+    padding: 1.5rem;
+  }
+}

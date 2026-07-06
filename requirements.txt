@@ -5,10 +5,16 @@ psutil>=5.9
 platformdirs>=4.2
 playwright>=1.44
 chess>=1.10
+questionary>=2.0
+fastapi>=0.110
+uvicorn>=0.29
+cryptography>=42.0
+qrcode[pil]>=7.4
 
 # dev / test
 pytest>=8.0
 pytest-mock>=3.14
+httpx2>=2.0
 
 # added in Phase 4 (kept here so install.ps1 can install everything up front)
 # mss>=9.0
