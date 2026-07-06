@@ -1,0 +1,147 @@
+# deskbot config — copied to ~/.deskbot/config.yaml on first run.
+# Edit the copy in ~/.deskbot, not this one (this is the package default).
+
+models:
+  ollama_host: "http://localhost:11434"
+  # selected_tier: auto | 8gb | 16gb | 32gb
+  # "auto" picks a tier from live RAM at first run and pins it here.
+  selected_tier: auto
+  ram_tiers:
+    8gb:
+      text: "qwen2.5:7b-instruct-q4_K_M"
+      vision: "moondream"
+    16gb:
+      text: "qwen2.5:14b-instruct-q4_K_M"
+      vision: "qwen2.5vl:7b"
+    32gb:
+      text: "qwen2.5:32b-instruct-q4_K_M"
+      vision: "qwen2.5vl:7b"
+
+agent:
+  default_persona: "friend"
+  temperature: 0.4
+  max_history_messages: 40
+  stream: true
+
+# --- Phase 2+ sections below are defined now so the schema is stable across
+# phases, but are inert until the corresponding phase wires them up. ---
+
+safety:
+  destructive_patterns:
+    - "del "
+    - "rd /s"
+    - "rm -rf"
+    - "format "
+    - "diskpart"
+    - "reg delete"
+    - "shutdown"
+    - "Remove-Item -Recurse -Force"
+  caution_patterns:
+    - ">"
+    - ">>"
+    - "New-Item"
+    - "Set-Content"
+    - "Copy-Item"
+    - "Move-Item"
+
+browser:
+  default_engine: edge
+  headless: false
+  persistent_profile: true
+  # cdp_attach: attach to a real, already-running, already-logged-in Edge/Chrome
+  # (launched with --remote-debugging-port=<cdp_port>) instead of launching a
+  # fresh automated one. This is the most reliable fix if search engines keep
+  # showing a CAPTCHA/"unusual traffic" wall — see README "Getting blocked by
+  # Google?" for setup steps. false launches a normal automated browser
+  # (stealth-patched, see tools/browser.py) using its own persistent profile.
+  cdp_attach: false
+  cdp_port: 9222
+  # Randomized pause before each search, in seconds — real users don't fire
+  # queries at machine-gun cadence, and search engines watch for that cadence
+  # as a bot signal. Set both to 0 to disable (e.g. if cdp_attach makes it
+  # unnecessary).
+  min_human_delay_seconds: 0.8
+  max_human_delay_seconds: 2.2
+  # Hard cap on simultaneously open tabs/windows (e.g. from target="_blank"
+  # links opened while researching) — extra ones are closed automatically.
+  max_open_windows: 3
+
+routines:
+  dir: "routines"
+
+chess:
+  # Model used to pick deskbot's moves in `deskbot chess`. Leave null to use
+  # your RAM tier's model. The model never freely invents a move — it's
+  # always shown the exact list of legal moves for the position and told to
+  # pick one, so even a small model plays validly (though not necessarily
+  # well); a bigger model will just play stronger chess.
+  model: null
+
+research:
+  # Deep research is code-driven, not left to the model's own tool planning:
+  # deskbot searches, scrapes real result links, and reads pages itself, then
+  # hands the model the raw material for one synthesis pass. This is what
+  # makes it reliable even on small models.
+  max_sources: 8              # distinct pages to read per research run (across all rounds)
+  per_source_chars: 8000      # cap on extracted text per individual page
+  max_corpus_chars: 80000     # hard ceiling on total characters handed to the model
+  # After the initial broad search, deskbot asks the model to propose this many
+  # specific follow-up questions and researches each one as its own round —
+  # this is what makes it "go deep" instead of just one flat search. Set to 0
+  # to disable and do a single-round search like before.
+  followup_rounds: 3
+  # After the planned follow-up rounds, deskbot keeps asking "what's still
+  # missing?" and researching new angles until the model says nothing
+  # important is left — a real researcher doesn't stop at a fixed count.
+  # max_total_rounds is the hard safety cap on ALL rounds combined (overview +
+  # planned follow-ups + adaptive digging), since small models won't always
+  # know when to stop on their own.
+  max_total_rounds: 8
+  # Skips these domains during search even if they rank — content farms,
+  # redirect/share pages, and sites that just return login/paywall
+  # boilerplate when scraped. Matches subdomains too (e.g. "foo.quora.com").
+  blocked_domains:
+    - "pinterest.com"
+    - "quora.com"
+    - "answers.com"
+    - "scribd.com"
+    - "slideshare.net"
+    - "chegg.com"
+  # After each section is drafted, re-checks it against its own sources and
+  # corrects unsupported claims. Costs one extra local call per section —
+  # cheap since everything's local, and it catches small-model hallucination
+  # before it reaches the report. Set to false to skip for speed.
+  verify_sections: true
+  # quick_model: used for normal chat/tool-calling and all the
+  # planning/checking calls above (leave unset to use the RAM-tier model
+  # above). deep_model: used ONLY for section synthesis, since long,
+  # well-organized writing benefits from a bigger model. If deep_model isn't
+  # pulled yet, deskbot falls back to quick_model automatically — set this
+  # once you've pulled a larger model.
+  quick_model: null
+  deep_model: "qwen2.5:14b-instruct-q4_K_M"
+
+game:
+  profiles_dir: "game_profiles"
+  fast_loop_fps: 15
+  slow_loop_interval_seconds: 3
+
+whatsapp:
+  enabled: false
+  path: "A"
+  cloud_api:
+    phone_number_id: ""
+    access_token_env: "WHATSAPP_ACCESS_TOKEN"
+    verify_token_env: "WHATSAPP_VERIFY_TOKEN"
+  bridge:
+    i_understand_ban_risk: false
+  approval_mode: true
+  business_hours:
+    start: "09:00"
+    end: "18:00"
+    away_message: "Thanks for reaching out! We're away right now and will reply during business hours."
+  rate_limit_per_minute: 10
+  handoff_keywords: ["agent", "human"]
+
+logging:
+  level: "INFO"
