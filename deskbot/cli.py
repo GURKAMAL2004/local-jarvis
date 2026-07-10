@@ -14,6 +14,7 @@
     deskbot schedule <name> <cron> register a routine with Windows Task Scheduler
     deskbot chess [--color white|black]  play chess against the local model
     deskbot ui [--port N]         launch the local web interface
+    deskbot watch [--port N]      distraction-free YouTube kiosk (no search bar, no feed)
     deskbot doctor                environment diagnostics
 """
 
@@ -48,7 +49,7 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     research_p.add_argument("topic", nargs="?", default=None, help="Topic to research (omit to be prompted)")
     research_p.add_argument(
-        "--mode", choices=["quick", "standard", "deep", "relentless", "scientist"], default=None,
+        "--mode", choices=["quick", "standard", "deep", "relentless", "scientist", "authority"], default=None,
         help="Research depth preset. Default: interactive menu (or 'standard' with --no-menu).",
     )
     research_p.add_argument(
@@ -95,6 +96,11 @@ def _build_parser() -> argparse.ArgumentParser:
     ui_p = sub.add_parser("ui", help="Launch the local web interface")
     ui_p.add_argument("--port", type=int, default=8420, help="Port to serve on (default: 8420)")
     ui_p.add_argument("--no-browser", action="store_true", help="Don't automatically open a browser tab")
+
+    watch_p = sub.add_parser(
+        "watch", help="Distraction-free YouTube kiosk: tell it what to watch, it asks, then plays — no search bar, no feed"
+    )
+    watch_p.add_argument("--port", type=int, default=8421, help="Local port for the kiosk backend (default: 8421)")
 
     sub.add_parser("doctor", help="Diagnose the local environment")
 
@@ -337,6 +343,11 @@ def main(argv: list[str] | None = None) -> int:
             threading.Timer(1.0, lambda: webbrowser.open(url)).start()
         uvicorn.run(create_app(config), host="127.0.0.1", port=args.port, log_level="warning")
         return 0
+
+    if args.command == "watch":
+        from deskbot.watch_kiosk import run_watch_kiosk
+
+        return run_watch_kiosk(config, port=args.port)
 
     if args.command == "doctor":
         from deskbot.doctor import run_doctor

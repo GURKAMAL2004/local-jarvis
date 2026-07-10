@@ -195,3 +195,38 @@ def test_chess_move_rejects_unknown_session(client):
 def test_chat_rejects_unknown_persona(client):
     r = client.post("/api/chat", json={"persona": "not-a-real-persona", "message": "hi"})
     assert r.status_code == 404
+
+
+def test_api_status_reports_up_with_models(client, monkeypatch):
+    from deskbot.llm import OllamaClient
+
+    monkeypatch.setattr(OllamaClient, "list_models", lambda self: ["model-a", "model-b"])
+    r = client.get("/api/status")
+    assert r.status_code == 200
+    assert r.json() == {"ollama": "up", "models": ["model-a", "model-b"]}
+
+
+def test_api_status_reports_down_when_unreachable(client, monkeypatch):
+    from deskbot.llm import OllamaClient, OllamaConnectionError
+
+    def raise_error(self):
+        raise OllamaConnectionError("down")
+
+    monkeypatch.setattr(OllamaClient, "list_models", raise_error)
+    r = client.get("/api/status")
+    assert r.status_code == 200
+    assert r.json() == {"ollama": "down", "models": []}
+
+
+def test_api_jobs_list_forwards_job_manager_state(client, monkeypatch):
+    """The control panel's Running Jobs endpoint should just be a thin
+    pass-through over jobs.list_jobs() — this is what fixes the overheating
+    incident: any job started through the web UI is now visible here
+    regardless of which view started it."""
+    from deskbot.webui import jobs as jobs_module
+
+    canned = [{"id": "abc123", "label": "Research: topic (deep)", "pid": 4242, "running": True, "started_at": 0.0, "elapsed_seconds": 90}]
+    monkeypatch.setattr(jobs_module, "list_jobs", lambda: canned)
+    r = client.get("/api/jobs")
+    assert r.status_code == 200
+    assert r.json() == {"jobs": canned}

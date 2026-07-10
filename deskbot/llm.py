@@ -110,10 +110,14 @@ class OllamaClient:
         messages: list[dict[str, str]],
         temperature: float = 0.4,
         tools: list[dict[str, Any]] | None = None,
+        format: str | dict[str, Any] | None = None,
     ) -> ChatMessage:
         """Single non-streaming round trip. Used for tool-calling turns, where the
         reply is a small structured tool_calls payload rather than prose worth
-        streaming token-by-token."""
+        streaming token-by-token. `format="json"` (or a JSON schema dict, on
+        Ollama versions that support it) constrains the reply to valid JSON —
+        used for structured decisions that aren't tool calls (see
+        deskbot.webui.watch)."""
         payload: dict[str, Any] = {
             "model": model,
             "messages": messages,
@@ -122,6 +126,8 @@ class OllamaClient:
         }
         if tools:
             payload["tools"] = tools
+        if format:
+            payload["format"] = format
 
         try:
             resp = requests.post(f"{self.host}/api/chat", json=payload, timeout=self.timeout)

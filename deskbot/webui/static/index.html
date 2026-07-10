@@ -20,10 +20,16 @@
   </nav>
 
   <main>
-    <!-- HOME -->
+    <!-- HOME / CONTROL PANEL -->
     <section class="view active" id="view-home">
       <h1>Welcome back.</h1>
       <p class="lede">Pick something to do. Everything here runs on your own machine — nothing leaves your computer.</p>
+
+      <div class="card" id="status-card">
+        <h3>System status</h3>
+        <p class="status-line" id="system-status">Checking...</p>
+      </div>
+
       <div class="tile-grid">
         <button class="tile" data-goto="chat">
           <span class="tile-icon">&#9993;</span>
@@ -50,6 +56,15 @@
           <h4>Premium</h4>
           <p>Support development and unlock premium.</p>
         </button>
+      </div>
+
+      <div class="card" id="jobs-card">
+        <h3>Running Jobs</h3>
+        <p class="field-hint">
+          Anything long-running (research, routines) shows up here for as long as this window stays open —
+          so nothing keeps running unnoticed in the background. Stop anything, any time.
+        </p>
+        <div id="jobs-list"><p class="status-line">No jobs started yet this session.</p></div>
       </div>
     </section>
 
@@ -83,15 +98,18 @@
           <option value="deep">Deep — more sources, thorough</option>
           <option value="relentless">Relentless — digs until you stop it</option>
           <option value="scientist">Scientist — hypothesis + evidence-vs-counter-evidence</option>
+          <option value="authority">Authority — expert persona, citations, research taxonomy</option>
         </select>
 
         <details class="advanced">
           <summary>Advanced: choose specific models</summary>
           <div class="card">
             <label for="research-quick-model">Planning model (optional)</label>
-            <input type="text" id="research-quick-model" placeholder="leave blank to use config default">
+            <input type="text" id="research-quick-model" list="research-models-datalist" placeholder="leave blank to use config default">
             <label for="research-synthesis-model">Writing model (optional)</label>
-            <input type="text" id="research-synthesis-model" placeholder="leave blank to use config default">
+            <input type="text" id="research-synthesis-model" list="research-models-datalist" placeholder="leave blank to use config default">
+            <datalist id="research-models-datalist"></datalist>
+            <p class="field-hint" id="research-models-hint"></p>
           </div>
         </details>
 

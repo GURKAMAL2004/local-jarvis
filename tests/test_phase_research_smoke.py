@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from deskbot.agent import Agent, ToolRegistry
 from deskbot.config import load_config
-from deskbot.llm import ChatMessage, OllamaClient, OllamaConnectionError
+from deskbot.llm import ChatMessage, OllamaClient, OllamaConnectionError, OllamaModelError
 from deskbot.memory import Memory
 from deskbot.research import (
     RESEARCH_MODE_PRESETS,
@@ -10,6 +10,7 @@ from deskbot.research import (
     Source,
     _domain,
     _is_blocked_domain,
+    _parse_leaf_items,
     _resolve_quick_model,
     _resolve_synthesis_model,
     _score_credibility,
@@ -17,10 +18,16 @@ from deskbot.research import (
     extract_factors,
     gather_sources,
     generate_additional_angles,
+    generate_expert_persona,
     generate_followup_questions,
     generate_hypothesis,
+    generate_research_taxonomy,
+    generate_taxonomy_domains,
+    generate_taxonomy_leaves,
+    generate_taxonomy_subtopics,
     pairwise_relationship_questions,
     prompt_research_setup,
+    render_taxonomy_markdown,
     run_deep_research,
     save_report,
     scientific_relationship_questions,
@@ -173,6 +180,38 @@ def test_synthesize_report_covers_every_round_independently(monkeypatch):
     assert "Section content about round one." in report
     assert "Section content about round two." in report
     assert "Section content about round three." in report
+
+
+def test_synthesize_report_drafts_sections_concurrently(monkeypatch):
+    """Regression test for the synthesis_workers change: sections for
+    independent angles must run concurrently, not one at a time. Proven with
+    a threading.Barrier that only releases once ALL n section-drafting calls
+    are in flight simultaneously — if a future regression made this
+    sequential again, the first call would block waiting on threads that
+    haven't started yet and this test would fail with BrokenBarrierError
+    instead of silently just being a bit slower."""
+    import threading
+
+    config = load_config()
+    n = 3
+    barrier = threading.Barrier(n, timeout=5)
+
+    def fake_chat(self, model, messages, temperature=0.4, tools=None):
+        angle_line = next((m for m in messages if m["role"] == "user"), None)["content"]
+        if angle_line.startswith("Angle:"):
+            barrier.wait()  # only returns once n sections are drafting at once
+            return "Section content."
+        return "ok"
+
+    monkeypatch.setattr(OllamaClient, "chat", fake_chat)
+    config._raw.setdefault("research", {})["verify_sections"] = False
+    agent = Agent(config, memory=Memory(), tools=ToolRegistry())
+    sources = [
+        Source(url=f"https://{i}.com", title=str(i), text="content", round_label=f"round {i}")
+        for i in range(n)
+    ]
+    report = synthesize_report(agent, "topic", sources)
+    assert report.count("Section content.") == n
 
 
 def test_save_report_writes_markdown_with_sources(tmp_path, monkeypatch):
@@ -481,7 +520,7 @@ def test_prompt_research_setup_custom_reads_every_field(monkeypatch):
     monkeypatch.setattr(OllamaClient, "list_models", lambda self: [])
 
     monkeypatch.setattr("deskbot.research._choose", lambda message, options, default_index=0: "custom")
-    confirms = iter([False, False, False])  # factor_analysis, verify_sections, adaptive_digging
+    confirms = iter([False, False, False, False])  # factor_analysis, academic_mode, verify_sections, adaptive_digging
     numbers = iter([5, 2000, 20000, 1, 3])  # max_sources, per_source_chars, max_corpus_chars, followup_rounds, max_total_rounds
     monkeypatch.setattr("deskbot.research._ask_confirm", lambda message, default: next(confirms))
     monkeypatch.setattr("deskbot.research._ask_number", lambda message, default: next(numbers))
@@ -493,7 +532,7 @@ def test_prompt_research_setup_custom_reads_every_field(monkeypatch):
     assert options == ResearchOptions(
         max_sources=5, per_source_chars=2000, max_corpus_chars=20000,
         followup_rounds=1, max_total_rounds=3, verify_sections=False, adaptive_digging=False,
-        factor_analysis=False,
+        factor_analysis=False, academic_mode=False,
     )
 
 
@@ -518,7 +557,7 @@ def test_prompt_research_setup_custom_factor_analysis_uses_relentless_ceilings(m
     monkeypatch.setattr(OllamaClient, "list_models", lambda self: [])
 
     monkeypatch.setattr("deskbot.research._choose", lambda message, options, default_index=0: "custom")
-    confirms = iter([True, False, False])  # factor_analysis, scientific_mode, verify_sections
+    confirms = iter([True, False, False, False])  # factor_analysis, scientific_mode, academic_mode, verify_sections
     numbers = iter([3000, 2])  # per_source_chars, followup_rounds
     monkeypatch.setattr("deskbot.research._ask_confirm", lambda message, default: next(confirms))
     monkeypatch.setattr("deskbot.research._ask_number", lambda message, default: next(numbers))
@@ -529,6 +568,7 @@ def test_prompt_research_setup_custom_factor_analysis_uses_relentless_ceilings(m
 
     assert options.factor_analysis is True
     assert options.scientific_mode is False
+    assert options.academic_mode is False
     assert options.max_total_rounds == RESEARCH_MODE_PRESETS["relentless"].max_total_rounds
     assert options.per_source_chars == 3000
     assert options.followup_rounds == 2
@@ -541,7 +581,7 @@ def test_prompt_research_setup_custom_can_enable_scientific_mode(monkeypatch):
     monkeypatch.setattr(OllamaClient, "list_models", lambda self: [])
 
     monkeypatch.setattr("deskbot.research._choose", lambda message, options, default_index=0: "custom")
-    confirms = iter([True, True, True])  # factor_analysis, scientific_mode, verify_sections
+    confirms = iter([True, True, False, True])  # factor_analysis, scientific_mode, academic_mode, verify_sections
     numbers = iter([3000, 2])
     monkeypatch.setattr("deskbot.research._ask_confirm", lambda message, default: next(confirms))
     monkeypatch.setattr("deskbot.research._ask_number", lambda message, default: next(numbers))
@@ -552,6 +592,40 @@ def test_prompt_research_setup_custom_can_enable_scientific_mode(monkeypatch):
 
     assert options.factor_analysis is True
     assert options.scientific_mode is True
+
+
+def test_prompt_research_setup_custom_can_enable_academic_mode(monkeypatch):
+    config = load_config()
+    agent = Agent(config, memory=Memory(), tools=ToolRegistry())
+    monkeypatch.setattr(OllamaClient, "list_models", lambda self: [])
+
+    monkeypatch.setattr("deskbot.research._choose", lambda message, options, default_index=0: "custom")
+    confirms = iter([False, True, True, True])  # factor_analysis, academic_mode, verify_sections, adaptive_digging
+    numbers = iter([5, 2000, 20000, 1, 3])
+    monkeypatch.setattr("deskbot.research._ask_confirm", lambda message, default: next(confirms))
+    monkeypatch.setattr("deskbot.research._ask_number", lambda message, default: next(numbers))
+    monkeypatch.setattr("deskbot.research._ask_model", lambda message, available: "")
+    monkeypatch.setattr("deskbot.research._ask_text", lambda message, default="": "")
+
+    options = prompt_research_setup(agent)
+
+    assert options.academic_mode is True
+    assert options.factor_analysis is False
+
+
+def test_prompt_research_setup_authority_choice(monkeypatch):
+    config = load_config()
+    agent = Agent(config, memory=Memory(), tools=ToolRegistry())
+    monkeypatch.setattr(OllamaClient, "list_models", lambda self: [])
+
+    monkeypatch.setattr("deskbot.research._choose", lambda message, options, default_index=0: "authority")
+    monkeypatch.setattr("deskbot.research._ask_model", lambda message, available: "")
+    monkeypatch.setattr("deskbot.research._ask_text", lambda message, default="": "")
+
+    options = prompt_research_setup(agent)
+
+    assert options.academic_mode is True
+    assert options.max_sources == RESEARCH_MODE_PRESETS["authority"].max_sources
 
 
 def test_prompt_research_setup_scientist_choice(monkeypatch):
@@ -842,6 +916,204 @@ def test_scientific_relationship_questions_skips_already_asked():
 
     assert len(pairs) == 1
     assert pairs[0][0] == (frozenset({"A", "B"}), "disconfirm")
+
+
+def test_generate_expert_persona_returns_stripped_model_reply(monkeypatch):
+    config = load_config()
+    monkeypatch.setattr(
+        OllamaClient, "chat",
+        lambda self, model, messages, temperature=0.4, tools=None: "  You are Dr. Jane Doe, an expert.  ",
+    )
+    agent = Agent(config, memory=Memory(), tools=ToolRegistry())
+    assert generate_expert_persona(agent, "topic") == "You are Dr. Jane Doe, an expert."
+
+
+def test_generate_expert_persona_falls_back_to_empty_on_model_error(monkeypatch):
+    config = load_config()
+
+    def raise_error(self, model, messages, temperature=0.4, tools=None):
+        raise OllamaConnectionError("down")
+
+    monkeypatch.setattr(OllamaClient, "chat", raise_error)
+    agent = Agent(config, memory=Memory(), tools=ToolRegistry())
+    assert generate_expert_persona(agent, "topic") == ""
+
+
+def test_parse_leaf_items_well_formed():
+    text = "Q: does X affect Y?\nH: X increases Y.\nM: run a controlled trial.\n\nQ: second question?\nH: second hypothesis.\nM: second method."
+    leaves = _parse_leaf_items(text, 5)
+
+    assert len(leaves) == 2
+    assert leaves[0] == {
+        "question": "does X affect Y?", "hypothesis": "X increases Y.", "method": "run a controlled trial.",
+    }
+    assert leaves[1]["question"] == "second question?"
+
+
+def test_parse_leaf_items_drops_incomplete_trailing_leaf():
+    text = "Q: complete one?\nH: yes.\nM: test it.\n\nQ: incomplete, no hypothesis or method"
+    leaves = _parse_leaf_items(text, 5)
+
+    assert len(leaves) == 1
+    assert leaves[0]["question"] == "complete one?"
+
+
+def test_parse_leaf_items_repeated_tag_starts_new_leaf():
+    """A model that starts a new Q: before finishing H:/M: for the previous
+    one shouldn't corrupt later leaves — the incomplete one is just dropped."""
+    text = "Q: first?\nQ: second?\nH: second hypothesis.\nM: second method."
+    leaves = _parse_leaf_items(text, 5)
+
+    assert len(leaves) == 1
+    assert leaves[0]["question"] == "second?"
+
+
+def test_parse_leaf_items_respects_n_cap():
+    text = "\n\n".join(f"Q: q{i}\nH: h{i}\nM: m{i}" for i in range(10))
+    assert len(_parse_leaf_items(text, 3)) == 3
+
+
+def test_generate_taxonomy_domains_parses_numbered_list(monkeypatch):
+    config = load_config()
+    monkeypatch.setattr(
+        OllamaClient, "chat",
+        lambda self, model, messages, temperature=0.4, tools=None: "1. Domain A\n2. Domain B\n3. Domain C",
+    )
+    agent = Agent(config, memory=Memory(), tools=ToolRegistry())
+    assert generate_taxonomy_domains(agent, "topic", n=3) == ["Domain A", "Domain B", "Domain C"]
+
+
+def test_generate_taxonomy_subtopics_parses_numbered_list(monkeypatch):
+    config = load_config()
+    monkeypatch.setattr(
+        OllamaClient, "chat",
+        lambda self, model, messages, temperature=0.4, tools=None: "1. Sub A\n2. Sub B",
+    )
+    agent = Agent(config, memory=Memory(), tools=ToolRegistry())
+    assert generate_taxonomy_subtopics(agent, "topic", "Domain A", n=2) == ["Sub A", "Sub B"]
+
+
+def test_generate_taxonomy_leaves_tags_domain_and_subtopic(monkeypatch):
+    config = load_config()
+    monkeypatch.setattr(
+        OllamaClient, "chat",
+        lambda self, model, messages, temperature=0.4, tools=None: "Q: q1?\nH: h1.\nM: m1.",
+    )
+    agent = Agent(config, memory=Memory(), tools=ToolRegistry())
+    leaves = generate_taxonomy_leaves(agent, "topic", "Domain A", "Sub A", n=1)
+
+    assert leaves == [{"question": "q1?", "hypothesis": "h1.", "method": "m1.", "domain": "Domain A", "subtopic": "Sub A"}]
+
+
+def test_generate_taxonomy_leaves_returns_empty_on_model_error(monkeypatch):
+    config = load_config()
+
+    def raise_error(self, model, messages, temperature=0.4, tools=None):
+        raise OllamaModelError("no such model")
+
+    monkeypatch.setattr(OllamaClient, "chat", raise_error)
+    agent = Agent(config, memory=Memory(), tools=ToolRegistry())
+    assert generate_taxonomy_leaves(agent, "topic", "Domain A", "Sub A") == []
+
+
+def test_generate_research_taxonomy_builds_full_hierarchy(monkeypatch):
+    """End-to-end taxonomy build against a fake chat that routes by prompt
+    content — proves the 3-level pagination (domains -> subtopics ->
+    leaves) actually wires together and produces the expected total count."""
+    config = load_config()
+
+    def fake_chat(self, model, messages, temperature=0.4, tools=None):
+        system = messages[0]["content"]
+        user = messages[1]["content"]
+        if "PRIMARY research domains" in system:
+            return "1. Domain A\n2. Domain B"
+        if "SECONDARY topics" in system:
+            domain = user.split("Primary domain: ")[1].strip()
+            return f"1. {domain}-Sub1\n2. {domain}-Sub2"
+        # leaf-generation call
+        subtopic = user.split("Secondary topic: ")[1].strip()
+        return f"Q: question about {subtopic}?\nH: hypothesis about {subtopic}.\nM: method for {subtopic}."
+
+    monkeypatch.setattr(OllamaClient, "chat", fake_chat)
+    agent = Agent(config, memory=Memory(), tools=ToolRegistry())
+
+    leaves = generate_research_taxonomy(
+        agent, "topic", n_domains=2, subtopics_per_domain=2, leaves_per_subtopic=1,
+    )
+
+    assert len(leaves) == 4  # 2 domains * 2 subtopics * 1 leaf
+    domains = {leaf["domain"] for leaf in leaves}
+    assert domains == {"Domain A", "Domain B"}
+    subtopics = {leaf["subtopic"] for leaf in leaves}
+    assert subtopics == {"Domain A-Sub1", "Domain A-Sub2", "Domain B-Sub1", "Domain B-Sub2"}
+
+
+def test_generate_research_taxonomy_returns_empty_when_no_domains(monkeypatch):
+    config = load_config()
+    agent = Agent(config, memory=Memory(), tools=ToolRegistry())
+    monkeypatch.setattr("deskbot.research.generate_taxonomy_domains", lambda *a, **k: [])
+
+    def fail_if_called(self, model, messages, temperature=0.4, tools=None):
+        raise AssertionError("should never reach a chat call once domains come back empty")
+
+    monkeypatch.setattr(OllamaClient, "chat", fail_if_called)
+    assert generate_research_taxonomy(agent, "topic") == []
+
+
+def test_render_taxonomy_markdown_groups_by_domain_and_subtopic():
+    leaves = [
+        {"domain": "D1", "subtopic": "S1", "question": "q1", "hypothesis": "h1", "method": "m1"},
+        {"domain": "D1", "subtopic": "S1", "question": "q2", "hypothesis": "h2", "method": "m2"},
+        {"domain": "D1", "subtopic": "S2", "question": "q3", "hypothesis": "h3", "method": "m3"},
+        {"domain": "D2", "subtopic": "S3", "question": "q4", "hypothesis": "h4", "method": "m4"},
+    ]
+    markdown = render_taxonomy_markdown(leaves)
+
+    assert "## Research Taxonomy" in markdown
+    assert "4 distinct, testable research questions across 2 primary domain(s)" in markdown
+    assert "### D1" in markdown and "### D2" in markdown
+    assert "#### S1" in markdown and "#### S2" in markdown and "#### S3" in markdown
+    assert markdown.index("### D1") < markdown.index("### D2")
+    assert "1. **Q:** q1" in markdown
+    assert "4. **Q:** q4" in markdown
+
+
+def test_render_taxonomy_markdown_empty_leaves_returns_empty_string():
+    assert render_taxonomy_markdown([]) == ""
+
+
+def test_synthesize_report_academic_mode_writes_persona_and_appends_taxonomy(monkeypatch):
+    """Integration test: options.academic_mode=True should (1) get a persona
+    threaded into every writing call's system prompt and (2) have a Research
+    Taxonomy block appended to the final report."""
+    config = load_config()
+
+    def fake_chat(self, model, messages, temperature=0.4, tools=None):
+        system = messages[0]["content"]
+        user = next((m["content"] for m in messages if m["role"] == "user"), "")
+        if "PRIMARY research domains" in system:
+            return "1. Domain A"
+        if "SECONDARY topics" in system:
+            return "1. Sub A"
+        if user.startswith("Overall topic:") and "Secondary topic:" in user:
+            return "Q: q1?\nH: h1.\nM: m1."
+        if user.startswith("Angle:"):
+            assert "Dr. Test Persona" in system  # persona threaded into section synthesis
+            assert "LaTeX" in system
+            return "Section body [Source 1]."
+        return "ok"
+
+    monkeypatch.setattr(OllamaClient, "chat", fake_chat)
+    monkeypatch.setattr("deskbot.research.generate_expert_persona", lambda agent, topic, quick_model=None: "You are Dr. Test Persona.")
+    config._raw.setdefault("research", {})["verify_sections"] = False
+    agent = Agent(config, memory=Memory(), tools=ToolRegistry())
+    sources = [Source(url="https://a.com", title="A", text="content", round_label="round one")]
+
+    options = ResearchOptions(academic_mode=True, verify_sections=False)
+    report = synthesize_report(agent, "topic", sources, options=options, persona="You are Dr. Test Persona.")
+
+    assert "## Research Taxonomy" in report
+    assert "q1?" in report
 
 
 def test_run_deep_research_scientific_mode_generates_hypothesis_and_evidence_rounds(monkeypatch):

@@ -345,6 +345,66 @@ details.advanced .card {
   margin: 0.75rem 0;
 }
 
+.status-line.error {
+  color: var(--terracotta);
+}
+
+/* --- running jobs panel (control panel) --- */
+
+.job-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  flex-wrap: wrap;
+  padding: 0.85rem 0;
+  border-bottom: 1px solid var(--border-gold);
+}
+
+.job-row:last-child {
+  border-bottom: none;
+}
+
+.job-info {
+  display: flex;
+  align-items: baseline;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+  min-width: 0;
+}
+
+.job-status-dot {
+  display: inline-block;
+  width: 0.6rem;
+  height: 0.6rem;
+  border-radius: 50%;
+  flex: none;
+}
+
+.job-status-dot.running {
+  background: var(--sage);
+  box-shadow: 0 0 6px var(--sage);
+}
+
+.job-status-dot.done {
+  background: var(--taupe);
+}
+
+.job-label {
+  color: var(--ivory);
+}
+
+.job-meta {
+  color: var(--taupe);
+  font-size: 0.85rem;
+}
+
+.job-stop {
+  min-height: 40px;
+  padding: 0.4rem 1.1rem;
+  font-size: 0.95rem;
+}
+
 /* --- chat --- */
 
 .chat-log {

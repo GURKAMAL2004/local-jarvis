@@ -20,6 +20,7 @@ from deskbot.config import Config
 from deskbot.llm import OllamaClient, OllamaConnectionError, OllamaModelError
 from deskbot.memory import Memory
 from deskbot.persona import Persona, load_persona
+from deskbot.resolver import QuickAction, resolve_quick_action
 
 console = Console()
 logger = logging.getLogger("deskbot.agent")
@@ -153,6 +154,16 @@ class Agent:
 
         return "(stopped after the max number of tool steps without a final answer — try a narrower task)"
 
+    def _run_quick_action(self, quick: QuickAction) -> str:
+        """Executes an already-resolved QuickAction directly through the tool
+        registry — no model call. Reuses the same registered tool functions
+        (and their retry/error handling) the agentic loop would have used."""
+        console.print(f"[dim]⚡ {quick.label} (instant — no model call)[/dim]")
+        result = self.tools.invoke(quick.tool, quick.args)
+        if result.get("ok"):
+            return f"{quick.label}."
+        return f"Couldn't {quick.label[0].lower()}{quick.label[1:]}: {result.get('error', 'unknown error')}"
+
     # --- public entry points -------------------------------------------------
 
     def converse(self, persona_name: str, message: str) -> str:
@@ -196,11 +207,15 @@ class Agent:
                 return
 
             self.memory.add_message(session_id, "user", user_input)
-            messages = self._history_as_messages(persona, session_id)
 
+            quick = resolve_quick_action(user_input, self.config) if use_tools else None
             console.print(f"[bold magenta]{persona_name}>[/bold magenta] ", end="" if not use_tools else "\n")
             try:
-                reply = self._run_agentic_turn(model, messages) if use_tools else self._stream_reply(model, messages)
+                if quick is not None:
+                    reply = self._run_quick_action(quick)
+                else:
+                    messages = self._history_as_messages(persona, session_id)
+                    reply = self._run_agentic_turn(model, messages) if use_tools else self._stream_reply(model, messages)
             except (OllamaConnectionError, OllamaModelError):
                 continue
             self.memory.add_message(session_id, "assistant", reply)
@@ -213,11 +228,16 @@ class Agent:
         use_tools = bool(self.tools.tools)
 
         self.memory.add_message(session_id, "user", task)
-        messages = self._history_as_messages(persona, session_id)
-        reply = (
-            self._run_agentic_turn(model, messages, max_steps=max_steps)
-            if use_tools
-            else self._stream_reply(model, messages)
-        )
+
+        quick = resolve_quick_action(task, self.config) if use_tools else None
+        if quick is not None:
+            reply = self._run_quick_action(quick)
+        else:
+            messages = self._history_as_messages(persona, session_id)
+            reply = (
+                self._run_agentic_turn(model, messages, max_steps=max_steps)
+                if use_tools
+                else self._stream_reply(model, messages)
+            )
         self.memory.add_message(session_id, "assistant", reply)
         return reply

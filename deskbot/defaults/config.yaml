@@ -44,6 +44,49 @@ safety:
     - "Copy-Item"
     - "Move-Item"
 
+quick_open:
+  # Instant open/launch for unambiguous commands like "open youtube" or
+  # "go to github" — resolved with zero LLM calls before falling through to
+  # the full agent loop. Extend freely; keys are matched after
+  # lowercasing/trimming. Doesn't handle compound commands ("search youtube
+  # for X") — those still go through the normal tool-calling agent.
+  sites:
+    youtube: "https://youtube.com"
+    gmail: "https://mail.google.com"
+    github: "https://github.com"
+    google: "https://google.com"
+    maps: "https://maps.google.com"
+    google maps: "https://maps.google.com"
+    twitter: "https://twitter.com"
+    x: "https://twitter.com"
+    reddit: "https://reddit.com"
+    amazon: "https://amazon.com"
+    netflix: "https://netflix.com"
+    spotify: "https://open.spotify.com"
+    outlook: "https://outlook.com"
+    wikipedia: "https://wikipedia.org"
+    whatsapp: "https://web.whatsapp.com"
+
+watch:
+  # `deskbot watch` — a distraction-free YouTube kiosk with no search bar,
+  # homepage, or recommendation feed. You say what you want; it asks
+  # clarifying questions when needed, searches for real, and plays the best
+  # actual match it found (never an invented video).
+  max_questions: 3    # clarifying questions asked before it must commit to a search
+  max_turns: 6         # hard cap on ask+search+play rounds combined, so it always converges
+  result_limit: 8      # how many real YouTube search results it scrapes and picks from
+  model: null           # override model for search/clarify reasoning; null = use the RAM-tier model
+  # classify_model: model used for the no-button command router (volume, mute,
+  # pause, layout, resize, "which pane"). Most of that is now handled by
+  # deterministic matching client-side with no model call at all — this only
+  # runs for phrasing the fast path doesn't recognize, and it's a much
+  # simpler task than search reasoning, so a small/fast model is a good fit
+  # if you have one pulled (e.g. "qwen2.5:1.5b-instruct-q4_K_M"). null = same
+  # model as `model` above.
+  classify_model: null
+  window_width: 1280
+  window_height: 800
+
 browser:
   default_engine: edge
   headless: false
@@ -112,6 +155,14 @@ research:
   # cheap since everything's local, and it catches small-model hallucination
   # before it reaches the report. Set to false to skip for speed.
   verify_sections: true
+  # How many sections synthesize_report drafts (and fact-checks) at the same
+  # time on a local thread pool, instead of one at a time — sections are
+  # independent of each other so there's nothing to lose by overlapping
+  # them. Raise it if you've got a beefy GPU/Ollama setup that handles
+  # concurrent requests well; lower it to 1 to force strictly sequential
+  # synthesis (e.g. on a small CPU-only machine where you'd rather one
+  # request finish cleanly than several compete for the same resources).
+  synthesis_workers: 4
   # quick_model: used for normal chat/tool-calling and all the
   # planning/checking calls above (leave unset to use the RAM-tier model
   # above). deep_model: used ONLY for section synthesis, since long,

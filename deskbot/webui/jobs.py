@@ -18,6 +18,7 @@ import re
 import subprocess
 import sys
 import threading
+import time
 import uuid
 from pathlib import Path
 
@@ -31,7 +32,11 @@ def deskbot_command(*args: str) -> list[str]:
     return [sys.executable, "-m", "deskbot", *args]
 
 
-def start_job(cmd: list[str]) -> str:
+def start_job(cmd: list[str], label: str | None = None) -> str:
+    """label is shown as-is in the control panel's Running Jobs list — pass a
+    human-readable description (e.g. "Research: creatine (scientist)") since
+    the raw command line is not something a non-technical user should have to
+    parse to tell two jobs apart. See list_jobs()."""
     job_id = uuid.uuid4().hex
     line_queue: queue.Queue[str | None] = queue.Queue()
 
@@ -51,7 +56,15 @@ def start_job(cmd: list[str]) -> str:
     )
 
     with _lock:
-        _jobs[job_id] = {"proc": proc, "queue": line_queue, "done": False, "report_path": None}
+        _jobs[job_id] = {
+            "proc": proc,
+            "queue": line_queue,
+            "done": False,
+            "report_path": None,
+            "label": label or " ".join(cmd),
+            "started_at": time.time(),
+            "pid": proc.pid,
+        }
 
     def _pump() -> None:
         assert proc.stdout is not None
@@ -74,6 +87,31 @@ def start_job(cmd: list[str]) -> str:
 def get_job(job_id: str) -> dict | None:
     with _lock:
         return _jobs.get(job_id)
+
+
+def list_jobs() -> list[dict]:
+    """Summary of every job started this server session (running or
+    finished), most recently started first — the data behind the control
+    panel's Running Jobs panel. This is what the overheating incident was
+    missing: a background job started outside any tracked job list had no
+    visible way to notice it was still running, let alone stop it. Every job
+    started through the web UI now shows up here regardless of which view
+    started it, and stays visible after finishing so a stale/crashed job
+    doesn't just silently disappear."""
+    with _lock:
+        jobs = list(_jobs.items())
+    now = time.time()
+    return [
+        {
+            "id": job_id,
+            "label": job["label"],
+            "pid": job["pid"],
+            "running": not job["done"],
+            "started_at": job["started_at"],
+            "elapsed_seconds": round(now - job["started_at"]),
+        }
+        for job_id, job in sorted(jobs, key=lambda kv: kv[1]["started_at"], reverse=True)
+    ]
 
 
 def stop_job(job_id: str) -> bool:

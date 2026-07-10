@@ -32,6 +32,7 @@ from deskbot.memory import Memory
 from deskbot.persona import PersonaNotFoundError, list_personas, load_persona
 from deskbot.routines import RoutineNotFoundError, list_routines, load_routine
 from deskbot.webui import jobs
+from deskbot.webui import watch as watch_module
 from deskbot.webui.licensing import verify_license_code
 
 STATIC_DIR = Path(__file__).resolve().parent / "static"
@@ -76,6 +77,25 @@ def index() -> str:
     return (STATIC_DIR / "index.html").read_text(encoding="utf-8")
 
 
+# --- system status (control panel) ------------------------------------------
+
+
+@app.get("/api/status")
+def api_status() -> dict:
+    """Powers the Home control panel's status strip: is Ollama actually
+    reachable right now, and what's pulled — the same live check `deskbot
+    doctor` does, surfaced where a non-technical user will actually see it
+    instead of a terminal command they don't know to run."""
+    from deskbot.llm import OllamaClient
+
+    client = OllamaClient(host=_cfg().ollama_host)
+    try:
+        models = client.list_models()
+        return {"ollama": "up", "models": models}
+    except OllamaConnectionError:
+        return {"ollama": "down", "models": []}
+
+
 # --- personas / chat ---------------------------------------------------------
 
 
@@ -108,6 +128,55 @@ def api_chat(payload: ChatRequest) -> dict:
     return {"reply": reply}
 
 
+# --- watch kiosk (distraction-free YouTube, no search bar/feed) ------------
+
+
+@app.get("/watch", response_class=HTMLResponse)
+def watch_page() -> str:
+    return (STATIC_DIR / "watch.html").read_text(encoding="utf-8")
+
+
+class WatchStartRequest(BaseModel):
+    request: str
+
+
+@app.post("/api/watch/start")
+def api_watch_start(payload: WatchStartRequest) -> dict:
+    session_id = watch_module.create_session(_cfg())
+    session = watch_module.get_session(session_id)
+    assert session is not None  # just created above
+    result = session.start(payload.request)
+    return {"session_id": session_id, **result}
+
+
+class WatchMessageRequest(BaseModel):
+    session_id: str
+    message: str
+
+
+@app.post("/api/watch/message")
+def api_watch_message(payload: WatchMessageRequest) -> dict:
+    session = watch_module.get_session(payload.session_id)
+    if session is None:
+        raise HTTPException(404, "Unknown watch session — start a new one")
+    return session.reply(payload.message)
+
+
+class WatchCommandRequest(BaseModel):
+    text: str
+    panes: list[dict]
+    last_active_pane: int | None = None
+    layout: int
+
+
+@app.post("/api/watch/command")
+def api_watch_command(payload: WatchCommandRequest) -> dict:
+    actions = watch_module.classify_command(
+        payload.text, payload.panes, payload.last_active_pane, payload.layout, _cfg()
+    )
+    return {"actions": actions}
+
+
 # --- deep research (subprocess job) -----------------------------------------
 
 
@@ -125,7 +194,8 @@ def api_research_start(payload: ResearchStartRequest) -> dict:
         args += ["--quick-model", payload.quick_model]
     if payload.synthesis_model:
         args += ["--synthesis-model", payload.synthesis_model]
-    job_id = jobs.start_job(jobs.deskbot_command(*args))
+    label = f"Research: {payload.topic} ({payload.mode})"
+    job_id = jobs.start_job(jobs.deskbot_command(*args), label=label)
     return {"job_id": job_id}
 
 
@@ -139,8 +209,17 @@ def api_routines_run(payload: RoutineRunRequest) -> dict:
     args = ["run", payload.name]
     for key, value in payload.params.items():
         args += ["--param", f"{key}={value}"]
-    job_id = jobs.start_job(jobs.deskbot_command(*args))
+    job_id = jobs.start_job(jobs.deskbot_command(*args), label=f"Routine: {payload.name}")
     return {"job_id": job_id}
+
+
+@app.get("/api/jobs")
+def api_jobs_list() -> dict:
+    """Backs the control panel's Running Jobs list — every job started this
+    server session, running or finished, so nothing can keep burning CPU
+    unnoticed the way the background research job that overheated this
+    machine once did."""
+    return {"jobs": jobs.list_jobs()}
 
 
 @app.get("/api/jobs/{job_id}/stream")

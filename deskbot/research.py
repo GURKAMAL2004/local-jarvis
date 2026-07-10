@@ -27,7 +27,19 @@ The pipeline, in order:
      covering every round was tried and failed twice in real testing, see
      synthesize_section), optionally followed by a self-fact-check pass
      that compares each section back against its own sources and corrects
-     unsupported claims.
+     unsupported claims. The "map" half of that (every angle's draft+verify)
+     runs concurrently across a small thread pool (research.synthesis_workers,
+     default DEFAULT_SYNTHESIS_WORKERS) instead of one angle at a time — each
+     angle's synthesis is independent of every other angle's, so there's
+     nothing to lose by overlapping the HTTP round trips to Ollama, and
+     nothing to gain by waiting on them serially. The three report-level
+     passes that don't depend on each other (key findings, contradictions,
+     factor/scientific analysis) run concurrently too; the conclusion still
+     runs last since it specifically reads the contradictions output. Network
+     fetching (gather_sources) deliberately stays sequential through the one
+     shared browser page — that serialization plus human_delay() is what
+     keeps research from looking like bot traffic (see tools/browser.py);
+     parallelizing it would undo that.
   6. A dedicated "Contradictions & Open Questions" pass reads across all the
      written sections and explicitly surfaces disagreements instead of
      letting synthesis quietly paper over them.
@@ -57,6 +69,25 @@ The pipeline, in order:
      never model-judged), and synthesize_scientific_assessment rates each
      relationship's evidence strength (Strong/Moderate/Weak/Conflicting/
      Insufficient) weighted by that credibility instead of source count alone.
+  10. Optional academic/"authority" mode (ResearchOptions.academic_mode, on
+      for the "authority" preset): generate_expert_persona invents one
+      plausible, field-appropriate domain-expert persona for the topic (a
+      name, credentials, institutions, decades of experience — the same
+      trick used everywhere else in this module: a small, narrowly-scoped
+      call the model is actually reliable at, instead of asking it to just
+      "sound like an expert" inline). Every section, the key findings, the
+      contradictions pass, and the conclusion are then written in that
+      persona's voice with LaTeX equations for quantitative relationships
+      and (Author, Year, Journal, Vol:Pages)-style citations (uncertain ones
+      explicitly flagged as `[citation needed — proposed: ...]` rather than
+      invented with false confidence). Finally, generate_research_taxonomy
+      builds a large hierarchy of specific, testable research
+      question/hypothesis/method leaves — domains, then subtopics per
+      domain, then leaves per subtopic — using the exact same deterministic
+      pagination pattern as factor/correlation digging (ask for a numbered
+      list, parse it, recurse) rather than one impossible mega-call, with
+      every independent branch fanned out concurrently on the same thread
+      pool synthesize_report's section synthesis uses.
 
 Two-model support: quick_model (config.research.quick_model, falls back to
 the RAM-tier model) drives every planning/checking call; deep_model is
@@ -69,6 +100,7 @@ from __future__ import annotations
 
 import logging
 import re
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
@@ -97,6 +129,22 @@ DEFAULT_MAX_TOTAL_ROUNDS = 8
 DEFAULT_VERIFY_SECTIONS = True
 DEFAULT_ADAPTIVE_ANGLES_PER_ROUND = 2
 DEFAULT_FACTORS_PER_EXTRACTION = 8
+# Academic/"authority" mode taxonomy shape: domains x subtopics x leaves. Fixed
+# counts rather than a range so the total is a deterministic floor (assuming
+# the model returns everything asked for) — 10*6*10 = 600, comfortably over
+# "at least 569". Real local-model output usually falls a bit short of the
+# ask on some branches; run_deep_research reports the actual count achieved
+# rather than silently claiming the full total (see the module docstring).
+DEFAULT_TAXONOMY_DOMAINS = 10
+DEFAULT_TAXONOMY_SUBTOPICS_PER_DOMAIN = 6
+DEFAULT_TAXONOMY_LEAVES_PER_SUBTOPIC = 10
+# How many angle-sections (draft + verify) synthesize_report runs concurrently.
+# Each angle's synthesis only reads its own sources, so this is purely
+# overlapping independent HTTP round trips to Ollama — safe regardless of
+# whether the local Ollama server itself processes them one at a time or in
+# parallel (OLLAMA_NUM_PARALLEL): worst case it's no slower than the old
+# strictly-sequential loop, best case it's several times faster.
+DEFAULT_SYNTHESIS_WORKERS = 4
 
 # Low-signal domains a human researcher would skip even if they rank —
 # content farms, redirect/share pages, and sites that block extraction
@@ -153,12 +201,26 @@ class ResearchOptions:
     # evidence actually is — see generate_hypothesis,
     # scientific_relationship_questions, and synthesize_scientific_assessment.
     scientific_mode: bool | None = None
+    # When True, deskbot writes like a named domain-expert authority instead
+    # of a generic analyst: it invents a plausible, field-appropriate expert
+    # persona for the topic (generate_expert_persona), writes sections in
+    # that formal, quantitative voice with LaTeX equations and
+    # (Author, Year, Journal, Vol:Pages)-style citations where appropriate,
+    # and appends a large hierarchical taxonomy of specific, testable
+    # research questions (generate_research_taxonomy) — the equivalent of a
+    # review article's "future work" section taken to its logical extreme.
+    # See the "authority" preset and the module docstring's academic-mode
+    # section.
+    academic_mode: bool | None = None
     # quick_model drives the cheap planning calls (follow-up questions, "what's
     # still missing" gap-checking). synthesis_model drives every call that
     # writes report prose (sections, fact-check, key findings, contradictions,
     # conclusion) — see the module docstring's two-model split.
     quick_model: str | None = None
     synthesis_model: str | None = None
+    # How many angle-sections synthesize_report drafts/verifies concurrently —
+    # see DEFAULT_SYNTHESIS_WORKERS. None falls back to config.yaml.
+    synthesis_workers: int | None = None
 
 
 # Effectively-unbounded ceilings for the "relentless" preset — large finite
@@ -210,6 +272,16 @@ RESEARCH_MODE_PRESETS: dict[str, ResearchOptions] = {
         factor_analysis=True,
         scientific_mode=True,
     ),
+    "authority": ResearchOptions(
+        max_sources=14,
+        per_source_chars=10_000,
+        max_corpus_chars=140_000,
+        followup_rounds=4,
+        max_total_rounds=14,
+        verify_sections=True,
+        adaptive_digging=True,
+        academic_mode=True,
+    ),
 }
 
 RESEARCH_MODE_DESCRIPTIONS: dict[str, str] = {
@@ -224,6 +296,11 @@ RESEARCH_MODE_DESCRIPTIONS: dict[str, str] = {
         "Forms a falsifiable hypothesis, actively hunts for evidence that would "
         "DISPROVE each factor relationship (not just confirm it), and rates "
         "confidence by source credibility. No real cap — Ctrl+C when satisfied."
+    ),
+    "authority": (
+        "Writes as an invented domain-expert authority — formal, quantitative, LaTeX "
+        "equations and (Author, Year, Journal, Vol:Pages) citations — then appends a "
+        "large taxonomy of hundreds of specific, testable research questions."
     ),
 }
 
@@ -245,6 +322,7 @@ class ResearchResult:
     report: str = ""
     saved_path: Path | None = None
     hypothesis: str = ""  # set only in scientific_mode — see generate_hypothesis()
+    persona: str = ""  # set only in academic_mode — see generate_expert_persona()
 
 
 # Credibility is scored from the domain alone — code-driven, not model-judged,
@@ -625,6 +703,270 @@ def scientific_relationship_questions(
     return out
 
 
+def generate_expert_persona(agent: Agent, topic: str, quick_model: str | None = None) -> str:
+    """Academic mode, step 1: invents one plausible, field-appropriate expert
+    persona for the topic (name, credentials, institutions, decades of
+    experience) — a narrow, well-scoped call the model is actually reliable
+    at, rather than asking every downstream writing call to "sound like an
+    expert" with no concrete voice to anchor to. Returns "" (mode degrades to
+    the normal generic-analyst voice) if the call fails."""
+    model = _resolve_quick_model(agent, quick_model)
+    messages = [
+        {
+            "role": "system",
+            "content": (
+                "You invent plausible expert personas for scientific/technical writing. Given a "
+                "topic, invent ONE fictional-but-realistic domain expert: a name and title, the "
+                "single most relevant credential or fellowship for this field, 2-3 real-sounding "
+                "institutions or companies where they worked, a rough number of decades of "
+                "experience, and an approximate publication count in journals plausible for this "
+                "field. Reply with ONLY a 2-3 sentence persona description written in second "
+                "person, e.g. 'You are Dr. ..., a ... with N years of ... experience at ..., ... "
+                "and .... You have published over N papers in ..., ..., and ....' No preamble, no "
+                "other text."
+            ),
+        },
+        {"role": "user", "content": f"Topic: {topic}"},
+    ]
+    try:
+        return agent.client.chat(model, messages, temperature=0.7).strip()
+    except (OllamaConnectionError, OllamaModelError) as e:
+        logger.warning("generate_expert_persona failed: %s", e)
+        return ""
+
+
+def _academic_style_instructions(persona: str) -> str:
+    """Appended to a synthesis call's system prompt when academic_mode is on
+    — the shared voice/formatting contract every writing call in the report
+    follows, so the persona, LaTeX equations, and citation format stay
+    consistent across sections instead of each call inventing its own style."""
+    return (
+        f"\n\n{persona}\n\nWrite in that voice: precise technical language, a formal but engaged "
+        "expository style suitable for a top-tier peer-reviewed review journal. Where a "
+        "quantitative relationship is central to the point being made, express it as a LaTeX "
+        "equation (inline like $F = Bli$, or a display equation on its own line for anything "
+        "derived, e.g. $$\\nabla^2 p = \\frac{1}{c^2}\\frac{\\partial^2 p}{\\partial t^2}$$). When "
+        "you reference a specific established finding, cite it inline as "
+        "(Author, Year, Journal, Volume:Pages); if you aren't certain of the exact citation, still "
+        "give your best real candidate but mark it '[citation needed — proposed: Author, Year, "
+        "Journal]' rather than presenting a fabricated citation with false confidence."
+    )
+
+
+_LEAF_LINE_RE = re.compile(r"^\s*(Q|H|M)\s*:\s*(.+)$", re.IGNORECASE | re.MULTILINE)
+_LEAF_KEY_BY_TAG = {"Q": "question", "H": "hypothesis", "M": "method"}
+
+
+def _parse_leaf_items(text: str, n: int) -> list[dict[str, str]]:
+    """Parses the Q:/H:/M: leaf format generate_taxonomy_leaves asks for.
+    Tolerant of models that drop the blank lines between items or occasionally
+    skip a field: a leaf is considered complete (and appended) the moment all
+    three tags have been seen since the last complete leaf, or immediately if
+    a tag repeats before the previous leaf was completed (the model started a
+    new item without finishing the last one) — a partial leaf missing a field
+    is dropped rather than emitted with a blank field."""
+    leaves: list[dict[str, str]] = []
+    current: dict[str, str] = {}
+    for tag, content in _LEAF_LINE_RE.findall(text):
+        key = _LEAF_KEY_BY_TAG[tag.upper()]
+        if key in current:
+            current = {}
+        current[key] = content.strip()
+        if len(current) == 3:
+            leaves.append(current)
+            current = {}
+    return leaves[:n]
+
+
+def generate_taxonomy_domains(
+    agent: Agent, topic: str, n: int = DEFAULT_TAXONOMY_DOMAINS, quick_model: str | None = None
+) -> list[str]:
+    """Academic mode taxonomy, level 1: the broad primary research domains a
+    review article on this topic would organize its "future work" agenda
+    around — pure list generation, the same parse_numbered_list pattern used
+    for follow-up questions and factors elsewhere in this module."""
+    model = _resolve_quick_model(agent, quick_model)
+    messages = [
+        {
+            "role": "system",
+            "content": (
+                "You are cataloguing a field of research for a comprehensive review article. Given "
+                f"a topic, name exactly {n} distinct, non-overlapping PRIMARY research domains "
+                "within it — broad areas the review would organize its research agenda around "
+                "(not the topic restated, not vague themes). Reply with ONLY a numbered list of "
+                f"exactly {n} short domain names, one per line, no other text."
+            ),
+        },
+        {"role": "user", "content": f"Topic: {topic}"},
+    ]
+    try:
+        text = agent.client.chat(model, messages, temperature=0.6)
+    except (OllamaConnectionError, OllamaModelError) as e:
+        logger.warning("generate_taxonomy_domains failed: %s", e)
+        return []
+    return _parse_numbered_list(text, n)
+
+
+def generate_taxonomy_subtopics(
+    agent: Agent,
+    topic: str,
+    domain: str,
+    n: int = DEFAULT_TAXONOMY_SUBTOPICS_PER_DOMAIN,
+    quick_model: str | None = None,
+) -> list[str]:
+    """Academic mode taxonomy, level 2: narrower secondary topics within one
+    primary domain, each broad enough to still contain several individual
+    research questions."""
+    model = _resolve_quick_model(agent, quick_model)
+    messages = [
+        {
+            "role": "system",
+            "content": (
+                "You are cataloguing a field of research. Given an overall topic and one primary "
+                f"research domain within it, name exactly {n} distinct SECONDARY topics within "
+                "that domain specifically — narrower than the domain but still broad enough to "
+                "contain several individual research questions. Reply with ONLY a numbered list of "
+                f"exactly {n} short secondary-topic names, one per line, no other text."
+            ),
+        },
+        {"role": "user", "content": f"Overall topic: {topic}\nPrimary domain: {domain}"},
+    ]
+    try:
+        text = agent.client.chat(model, messages, temperature=0.6)
+    except (OllamaConnectionError, OllamaModelError) as e:
+        logger.warning("generate_taxonomy_subtopics failed for domain %r: %s", domain, e)
+        return []
+    return _parse_numbered_list(text, n)
+
+
+def generate_taxonomy_leaves(
+    agent: Agent,
+    topic: str,
+    domain: str,
+    subtopic: str,
+    n: int = DEFAULT_TAXONOMY_LEAVES_PER_SUBTOPIC,
+    quick_model: str | None = None,
+) -> list[dict[str, str]]:
+    """Academic mode taxonomy, level 3 (the leaves): specific, testable,
+    thesis-chapter-sized research questions within one secondary topic, each
+    paired with a falsifiable hypothesis and a concrete method — grounded,
+    answerable research units rather than the topic restated at increasing
+    specificity."""
+    model = _resolve_quick_model(agent, quick_model)
+    messages = [
+        {
+            "role": "system",
+            "content": (
+                "You are proposing original research questions for a scientific review's future-work "
+                "agenda. Given an overall topic, a primary research domain, and one secondary topic "
+                f"within it, propose exactly {n} specific, testable, thesis-chapter-sized research "
+                "questions — real, narrow, answerable questions, not restatements of the topic. For "
+                "each one give: a specific research QUESTION, a falsifiable HYPOTHESIS it would test, "
+                "and a concrete experimental or theoretical METHOD to answer it. Reply with ONLY the "
+                "leaf items in EXACTLY this format, one after another with a blank line between "
+                "items, no numbering, no other text:\nQ: <question>\nH: <hypothesis>\nM: <method>"
+            ),
+        },
+        {"role": "user", "content": f"Overall topic: {topic}\nPrimary domain: {domain}\nSecondary topic: {subtopic}"},
+    ]
+    try:
+        text = agent.client.chat(model, messages, temperature=0.7)
+    except (OllamaConnectionError, OllamaModelError) as e:
+        logger.warning("generate_taxonomy_leaves failed for %r / %r: %s", domain, subtopic, e)
+        return []
+    leaves = _parse_leaf_items(text, n)
+    for leaf in leaves:
+        leaf["domain"] = domain
+        leaf["subtopic"] = subtopic
+    return leaves
+
+
+def generate_research_taxonomy(
+    agent: Agent,
+    topic: str,
+    quick_model: str | None = None,
+    n_domains: int = DEFAULT_TAXONOMY_DOMAINS,
+    subtopics_per_domain: int = DEFAULT_TAXONOMY_SUBTOPICS_PER_DOMAIN,
+    leaves_per_subtopic: int = DEFAULT_TAXONOMY_LEAVES_PER_SUBTOPIC,
+    workers: int = DEFAULT_SYNTHESIS_WORKERS,
+) -> list[dict[str, str]]:
+    """Builds the full 3-level taxonomy the same way the rest of this module
+    handles anything too big for one call: deterministic pagination (ask for
+    a numbered list, parse it, recurse into each item) rather than asking a
+    small local model for "hundreds of rigorous research questions" in a
+    single shot, which it cannot do reliably. Every independent branch at
+    each level is fanned out concurrently on a thread pool — level 2 across
+    domains, level 3 across every (domain, subtopic) pair — the same pattern
+    synthesize_report uses for section synthesis, since these calls are just
+    as independent of each other as separate report sections are."""
+    domains = generate_taxonomy_domains(agent, topic, n_domains, quick_model)
+    if not domains:
+        return []
+
+    with ThreadPoolExecutor(max_workers=max(1, min(workers, len(domains)))) as pool:
+        subtopic_futures = {
+            pool.submit(generate_taxonomy_subtopics, agent, topic, domain, subtopics_per_domain, quick_model): domain
+            for domain in domains
+        }
+        subtopics_by_domain = {subtopic_futures[f]: f.result() for f in subtopic_futures}
+
+    pairs = [(domain, subtopic) for domain in domains for subtopic in subtopics_by_domain.get(domain, [])]
+    if not pairs:
+        return []
+
+    with ThreadPoolExecutor(max_workers=max(1, min(workers, len(pairs)))) as pool:
+        leaf_futures = [
+            pool.submit(generate_taxonomy_leaves, agent, topic, domain, subtopic, leaves_per_subtopic, quick_model)
+            for domain, subtopic in pairs
+        ]
+        return [leaf for future in leaf_futures for leaf in future.result()]
+
+
+def render_taxonomy_markdown(leaves: list[dict[str, str]]) -> str:
+    """Regroups the flat leaf list back into domain -> subtopic Markdown
+    headings, in first-seen order, with each leaf numbered sequentially."""
+    if not leaves:
+        return ""
+
+    domain_order: list[str] = []
+    by_domain: dict[str, list[dict[str, str]]] = {}
+    for leaf in leaves:
+        d = leaf["domain"]
+        if d not in by_domain:
+            by_domain[d] = []
+            domain_order.append(d)
+        by_domain[d].append(leaf)
+
+    lines = [
+        "## Research Taxonomy",
+        "",
+        f"*{len(leaves)} distinct, testable research questions across {len(domain_order)} primary domain(s).*",
+        "",
+    ]
+    n = 0
+    for domain in domain_order:
+        lines.append(f"### {domain}")
+        lines.append("")
+        subtopic_order: list[str] = []
+        by_subtopic: dict[str, list[dict[str, str]]] = {}
+        for leaf in by_domain[domain]:
+            s = leaf["subtopic"]
+            if s not in by_subtopic:
+                by_subtopic[s] = []
+                subtopic_order.append(s)
+            by_subtopic[s].append(leaf)
+        for subtopic in subtopic_order:
+            lines.append(f"#### {subtopic}")
+            lines.append("")
+            for leaf in by_subtopic[subtopic]:
+                n += 1
+                lines.append(f"{n}. **Q:** {leaf['question']}")
+                lines.append(f"   **Hypothesis:** {leaf['hypothesis']}")
+                lines.append(f"   **Method:** {leaf['method']}")
+                lines.append("")
+    return "\n".join(lines)
+
+
 def _resolve_synthesis_model(agent: Agent, override: str | None = None) -> str:
     cfg = agent.config
     quick_model = _resolve_quick_model(agent)
@@ -659,25 +1001,30 @@ def _build_corpus(sources: list[Source]) -> str:
     return "\n\n".join(f"[Source {i}: {s.title} — {s.url}]\n{s.text}" for i, s in enumerate(sources, 1))
 
 
-def synthesize_section(agent: Agent, model: str, angle: str, sources: list[Source]) -> str:
+def synthesize_section(agent: Agent, model: str, angle: str, sources: list[Source], persona: str = "") -> str:
     """One angle, synthesized on its own. A giant single call covering every
     round was tried first and failed twice in real testing — the model
     consistently let whichever angle appeared last in the context crowd out
     earlier ones (recency bias over long contexts). Synthesizing each round
     independently makes that structurally impossible: each call only ever
-    sees one angle's material, so every angle reliably gets its own section."""
+    sees one angle's material, so every angle reliably gets its own section.
+
+    persona (academic mode only — see generate_expert_persona) switches the
+    voice to that invented domain expert and requires LaTeX equations /
+    formal citations where appropriate; empty string keeps the plain
+    generic-analyst voice."""
     corpus = _build_corpus(sources)
+    system = (
+        "You are a research analyst. Using ONLY the provided source excerpts, write a "
+        "focused, well-organized section covering this specific angle. Cite claims by "
+        "source number like [Source 2], and note if sources disagree. Do not invent "
+        "facts that aren't present in the sources, and do not include unrelated "
+        "boilerplate from the sources (contact details, ads, navigation text, etc.)."
+    )
+    if persona:
+        system += _academic_style_instructions(persona)
     messages = [
-        {
-            "role": "system",
-            "content": (
-                "You are a research analyst. Using ONLY the provided source excerpts, write a "
-                "focused, well-organized section covering this specific angle. Cite claims by "
-                "source number like [Source 2], and note if sources disagree. Do not invent "
-                "facts that aren't present in the sources, and do not include unrelated "
-                "boilerplate from the sources (contact details, ads, navigation text, etc.)."
-            ),
-        },
+        {"role": "system", "content": system},
         {"role": "user", "content": f"Angle: {angle}\n\n{corpus}\n\nWrite this section now."},
     ]
     try:
@@ -686,24 +1033,36 @@ def synthesize_section(agent: Agent, model: str, angle: str, sources: list[Sourc
         return f"(Section synthesis failed for '{angle}': {e})"
 
 
-def verify_section(agent: Agent, model: str, angle: str, sources: list[Source], draft: str) -> str:
+def verify_section(agent: Agent, model: str, angle: str, sources: list[Source], draft: str, academic: bool = False) -> str:
     """Self-fact-check pass: re-reads the drafted section against its own
     source excerpts and corrects anything unsupported. Small models
     sometimes drift from "summarize this" into adding a plausible-sounding
-    but unstated detail — this catches that before it reaches the report."""
+    but unstated detail — this catches that before it reaches the report.
+
+    academic=True (mirrors ResearchOptions.academic_mode) adds an explicit
+    carve-out for LaTeX equations and `[citation needed — proposed: ...]`
+    markers: those are standard field/derivation content and explicit
+    uncertainty flags, not sourced claims, so the fact-checker shouldn't
+    strip them just because the scraped web sources don't restate them
+    verbatim."""
     corpus = _build_corpus(sources)
+    system = (
+        "You are a meticulous fact-checking editor reviewing a drafted research section "
+        "against its source material. Compare every factual claim in the draft to the "
+        "source excerpts below. If a claim is not supported by any source, remove it or "
+        "rewrite it as clearly uncertain. Keep correct, well-supported claims and their "
+        "[Source N] citations exactly as they are. Reply with ONLY the corrected section "
+        "text — no preamble, no commentary about what you changed."
+    )
+    if academic:
+        system += (
+            " This section may contain LaTeX equations and citations already marked "
+            "'[citation needed — proposed: ...]' — these are standard field/derivation "
+            "content and explicit uncertainty flags, not claims sourced from the excerpts "
+            "above. Preserve them exactly as written unless they directly contradict a source."
+        )
     messages = [
-        {
-            "role": "system",
-            "content": (
-                "You are a meticulous fact-checking editor reviewing a drafted research section "
-                "against its source material. Compare every factual claim in the draft to the "
-                "source excerpts below. If a claim is not supported by any source, remove it or "
-                "rewrite it as clearly uncertain. Keep correct, well-supported claims and their "
-                "[Source N] citations exactly as they are. Reply with ONLY the corrected section "
-                "text — no preamble, no commentary about what you changed."
-            ),
-        },
+        {"role": "system", "content": system},
         {"role": "user", "content": f"{corpus}\n\nDrafted section:\n{draft}\n\nReturn the corrected section now."},
     ]
     try:
@@ -714,19 +1073,19 @@ def verify_section(agent: Agent, model: str, angle: str, sources: list[Source], 
         return draft
 
 
-def synthesize_key_findings(agent: Agent, model: str, topic: str, combined_body: str) -> str:
+def synthesize_key_findings(agent: Agent, model: str, topic: str, combined_body: str, persona: str = "") -> str:
+    system = (
+        "You are a research editor. You'll be given a topic and a set of already-written "
+        "research sections. Write ONLY a short introduction (2-3 sentences framing the "
+        "topic), then a '## Key Findings' section with 5-8 concise bullet points capturing "
+        "the single most important, concrete takeaways a busy reader needs — specific "
+        "numbers, names, and conclusions, not vague generalities. Do not rewrite or repeat "
+        "the sections themselves. Label the findings list exactly '## Key Findings'."
+    )
+    if persona:
+        system += _academic_style_instructions(persona)
     messages = [
-        {
-            "role": "system",
-            "content": (
-                "You are a research editor. You'll be given a topic and a set of already-written "
-                "research sections. Write ONLY a short introduction (2-3 sentences framing the "
-                "topic), then a '## Key Findings' section with 5-8 concise bullet points capturing "
-                "the single most important, concrete takeaways a busy reader needs — specific "
-                "numbers, names, and conclusions, not vague generalities. Do not rewrite or repeat "
-                "the sections themselves. Label the findings list exactly '## Key Findings'."
-            ),
-        },
+        {"role": "system", "content": system},
         {"role": "user", "content": f"Topic: {topic}\n\nSections already written:\n{combined_body}"},
     ]
     try:
@@ -735,23 +1094,23 @@ def synthesize_key_findings(agent: Agent, model: str, topic: str, combined_body:
         return ""
 
 
-def synthesize_contradictions(agent: Agent, model: str, topic: str, combined_body: str) -> str:
+def synthesize_contradictions(agent: Agent, model: str, topic: str, combined_body: str, persona: str = "") -> str:
     """A dedicated pass whose only job is to look for disagreement — section
     synthesis is written per-angle and can't see across angles, so nothing
     upstream of this ever compares sections against each other."""
+    system = (
+        "You are a skeptical research editor. Given a topic and a set of already-written "
+        "research sections (each cites sources like [Source 2]), identify any places "
+        "where sources disagree, numbers conflict, or important questions remain "
+        "open/unresolved. Be specific — name the conflicting claims and which "
+        "sections/sources they came from. If you genuinely find nothing significant, say "
+        "so in one sentence instead of inventing disagreement. Label your output exactly "
+        "'## Contradictions & Open Questions'."
+    )
+    if persona:
+        system += _academic_style_instructions(persona)
     messages = [
-        {
-            "role": "system",
-            "content": (
-                "You are a skeptical research editor. Given a topic and a set of already-written "
-                "research sections (each cites sources like [Source 2]), identify any places "
-                "where sources disagree, numbers conflict, or important questions remain "
-                "open/unresolved. Be specific — name the conflicting claims and which "
-                "sections/sources they came from. If you genuinely find nothing significant, say "
-                "so in one sentence instead of inventing disagreement. Label your output exactly "
-                "'## Contradictions & Open Questions'."
-            ),
-        },
+        {"role": "system", "content": system},
         {"role": "user", "content": f"Topic: {topic}\n\nSections already written:\n{combined_body}"},
     ]
     try:
@@ -834,19 +1193,21 @@ def synthesize_scientific_assessment(
         return ""
 
 
-def synthesize_conclusion(agent: Agent, model: str, topic: str, combined_body: str, contradictions: str) -> str:
+def synthesize_conclusion(
+    agent: Agent, model: str, topic: str, combined_body: str, contradictions: str, persona: str = ""
+) -> str:
     """Written last, after contradictions are known, so it can honestly
     reflect whatever uncertainty was found instead of a falsely tidy wrap-up."""
+    system = (
+        "You are a research editor writing the closing section of a report. Given the "
+        "topic, the written sections, and a summary of any contradictions/open questions, "
+        "write ONLY a short conclusion (3-5 sentences) synthesizing across the sections, "
+        "honestly reflecting any uncertainty noted. Label it exactly '## Conclusion'."
+    )
+    if persona:
+        system += _academic_style_instructions(persona)
     messages = [
-        {
-            "role": "system",
-            "content": (
-                "You are a research editor writing the closing section of a report. Given the "
-                "topic, the written sections, and a summary of any contradictions/open questions, "
-                "write ONLY a short conclusion (3-5 sentences) synthesizing across the sections, "
-                "honestly reflecting any uncertainty noted. Label it exactly '## Conclusion'."
-            ),
-        },
+        {"role": "system", "content": system},
         {
             "role": "user",
             "content": (
@@ -869,6 +1230,7 @@ def synthesize_report(
     options: ResearchOptions | None = None,
     factors: list[str] | None = None,
     hypothesis: str = "",
+    persona: str = "",
 ) -> str:
     options = options or ResearchOptions()
     model = _resolve_synthesis_model(agent, options.synthesis_model)
@@ -878,40 +1240,74 @@ def synthesize_report(
         else bool(agent.config.get("research", "verify_sections", default=DEFAULT_VERIFY_SECTIONS))
     )
     grouped = _group_by_round(sources)
-    console.print(f"[dim]Writing {len(grouped)} section(s) with '{model}'...[/dim]")
+    workers = options.synthesis_workers if options.synthesis_workers is not None else int(
+        agent.config.get("research", "synthesis_workers", default=DEFAULT_SYNTHESIS_WORKERS)
+    )
+    workers = max(1, min(workers, len(grouped) or 1))
+    console.print(f"[dim]Writing {len(grouped)} section(s) with '{model}' ({workers} at a time)...[/dim]")
 
-    sections: list[tuple[str, str]] = []
-    for angle, angle_sources in grouped:
-        console.print(f"  [dim]section:[/dim] {angle[:70]}")
-        draft = synthesize_section(agent, model, angle, angle_sources)
-        if verify:
-            draft = verify_section(agent, model, angle, angle_sources, draft)
-        sections.append((angle, draft))
+    def _draft_and_verify(angle: str, angle_sources: list[Source]) -> str:
+        draft = synthesize_section(agent, model, angle, angle_sources, persona=persona)
+        return verify_section(agent, model, angle, angle_sources, draft, academic=bool(persona)) if verify else draft
+
+    sections: list[tuple[str, str] | None] = [None] * len(grouped)
+    if grouped:
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            futures = {
+                pool.submit(_draft_and_verify, angle, angle_sources): i
+                for i, (angle, angle_sources) in enumerate(grouped)
+            }
+            for future in futures:
+                i = futures[future]
+                angle = grouped[i][0]
+                sections[i] = (angle, future.result())
+                console.print(f"  [dim]section done:[/dim] {angle[:70]}")
 
     combined_body = "\n\n".join(f"## {angle}\n\n{text}" for angle, text in sections)
 
-    console.print("[dim]Writing introduction and key findings...[/dim]")
-    opening = synthesize_key_findings(agent, model, topic, combined_body)
-
     hypothesis_block = f"## Hypothesis\n\n{hypothesis}" if hypothesis else ""
 
-    factor_relationships = ""
-    if factors:
-        if options.scientific_mode:
-            console.print(f"[dim]Running scientific assessment across {len(factors)} factor(s)...[/dim]")
-            factor_relationships = synthesize_scientific_assessment(agent, model, topic, hypothesis, factors, sources)
-        else:
-            console.print(f"[dim]Mapping relationships across {len(factors)} factor(s)...[/dim]")
-            factor_relationships = synthesize_factor_relationships(agent, model, topic, factors, combined_body)
-
-    console.print("[dim]Checking for contradictions and open questions...[/dim]")
-    contradictions = synthesize_contradictions(agent, model, topic, combined_body)
+    # Key findings, contradictions, and factor/scientific analysis each only
+    # read combined_body/factors/sources — none depends on another's output —
+    # so they run concurrently too. The conclusion is the one pass that
+    # genuinely has to wait: it reads the contradictions text.
+    console.print("[dim]Writing introduction, contradictions, and factor analysis (in parallel)...[/dim]")
+    with ThreadPoolExecutor(max_workers=3) as pool:
+        opening_future = pool.submit(synthesize_key_findings, agent, model, topic, combined_body, persona)
+        contradictions_future = pool.submit(synthesize_contradictions, agent, model, topic, combined_body, persona)
+        factor_future = None
+        if factors:
+            if options.scientific_mode:
+                factor_future = pool.submit(
+                    synthesize_scientific_assessment, agent, model, topic, hypothesis, factors, sources
+                )
+            else:
+                factor_future = pool.submit(synthesize_factor_relationships, agent, model, topic, factors, combined_body)
+        opening = opening_future.result()
+        contradictions = contradictions_future.result()
+        factor_relationships = factor_future.result() if factor_future else ""
 
     console.print("[dim]Writing conclusion...[/dim]")
-    conclusion = synthesize_conclusion(agent, model, topic, combined_body, contradictions)
+    conclusion = synthesize_conclusion(agent, model, topic, combined_body, contradictions, persona)
+
+    taxonomy_block = ""
+    if options.academic_mode:
+        console.print(
+            "[dim]Building research taxonomy (many small, narrowly-scoped model calls, "
+            "fanned out concurrently)...[/dim]"
+        )
+        leaves = generate_research_taxonomy(agent, topic, quick_model=options.quick_model, workers=workers)
+        if leaves:
+            taxonomy_block = render_taxonomy_markdown(leaves)
+            console.print(f"[dim]Research taxonomy: {len(leaves)} leaf question(s) generated.[/dim]")
+        else:
+            console.print("[yellow]Research taxonomy generation produced no usable leaves.[/yellow]")
 
     return "\n\n".join(
-        p for p in (opening, hypothesis_block, factor_relationships, combined_body, contradictions, conclusion) if p
+        p for p in (
+            opening, hypothesis_block, factor_relationships, combined_body, contradictions, conclusion,
+            taxonomy_block,
+        ) if p
     )
 
 
@@ -1007,8 +1403,10 @@ def run_deep_research(agent: Agent, topic: str, options: ResearchOptions | None 
     followups: list[str] = []
     factors: list[str] = []
     hypothesis = ""
+    persona = ""
     factor_analysis = bool(options.factor_analysis)
     scientific_mode = bool(options.scientific_mode)
+    academic_mode = bool(options.academic_mode)
 
     # Everything that digs for more material is interruptible: Ctrl+C at any
     # point here drops straight to synthesis with whatever's been gathered
@@ -1019,6 +1417,11 @@ def run_deep_research(agent: Agent, topic: str, options: ResearchOptions | None 
             hypothesis = generate_hypothesis(agent, topic, all_sources, quick_model=options.quick_model)
             if hypothesis:
                 console.print(f"[bold]Hypothesis:[/bold] {hypothesis}")
+
+        if academic_mode:
+            persona = generate_expert_persona(agent, topic, quick_model=options.quick_model)
+            if persona:
+                console.print(f"[bold]Writing as:[/bold] {persona}")
 
         if followup_rounds > 0:
             console.print("[dim]Identifying follow-up angles to dig into...[/dim]")
@@ -1094,7 +1497,8 @@ def run_deep_research(agent: Agent, topic: str, options: ResearchOptions | None 
     )
 
     report = synthesize_report(
-        agent, topic, all_sources, followups, options=options, factors=factors, hypothesis=hypothesis
+        agent, topic, all_sources, followups, options=options, factors=factors,
+        hypothesis=hypothesis, persona=persona,
     )
     saved_path = save_report(topic, all_sources, report)
 
@@ -1102,7 +1506,7 @@ def run_deep_research(agent: Agent, topic: str, options: ResearchOptions | None 
     console.print(f"[green]Report saved to:[/green] {saved_path}")
     return ResearchResult(
         topic=topic, sources=all_sources, followup_questions=followups, report=report,
-        saved_path=saved_path, hypothesis=hypothesis,
+        saved_path=saved_path, hypothesis=hypothesis, persona=persona,
     )
 
 
@@ -1177,8 +1581,14 @@ _MODE_MENU_OPTIONS: list[tuple[str, str]] = [
     ("deep", f"Deep       — {RESEARCH_MODE_DESCRIPTIONS['deep']}"),
     ("relentless", f"Relentless — {RESEARCH_MODE_DESCRIPTIONS['relentless']}"),
     ("scientist", f"Scientist  — {RESEARCH_MODE_DESCRIPTIONS['scientist']}"),
+    ("authority", f"Authority  — {RESEARCH_MODE_DESCRIPTIONS['authority']}"),
     ("custom", "Custom     — configure every setting yourself."),
 ]
+
+_ACADEMIC_MODE_PROMPT = (
+    "Write as an invented domain-expert authority (LaTeX equations, formal citations) and "
+    "append a large taxonomy of specific research questions?"
+)
 
 
 def _prompt_custom_options() -> ResearchOptions:
@@ -1195,6 +1605,7 @@ def _prompt_custom_options() -> ResearchOptions:
             "Also use the scientific method — falsifiable hypothesis, actively hunt for "
             "disconfirming evidence too, rate confidence by source credibility?", False
         )
+        academic_mode = _ask_confirm(_ACADEMIC_MODE_PROMPT, False)
         return ResearchOptions(
             max_sources=_RELENTLESS_MAX_SOURCES,
             per_source_chars=_ask_number("Max characters read per source", DEFAULT_PER_SOURCE_CHARS),
@@ -1205,7 +1616,9 @@ def _prompt_custom_options() -> ResearchOptions:
             adaptive_digging=True,
             factor_analysis=True,
             scientific_mode=scientific_mode,
+            academic_mode=academic_mode,
         )
+    academic_mode = _ask_confirm(_ACADEMIC_MODE_PROMPT, False)
     return ResearchOptions(
         max_sources=_ask_number("Max sources to read (across all rounds)", DEFAULT_MAX_SOURCES),
         per_source_chars=_ask_number("Max characters read per source", DEFAULT_PER_SOURCE_CHARS),
@@ -1217,6 +1630,7 @@ def _prompt_custom_options() -> ResearchOptions:
         verify_sections=_ask_confirm("Fact-check each section against its own sources?", DEFAULT_VERIFY_SECTIONS),
         adaptive_digging=_ask_confirm("Keep digging adaptively until nothing important is missing?", True),
         factor_analysis=False,
+        academic_mode=academic_mode,
     )
 
 

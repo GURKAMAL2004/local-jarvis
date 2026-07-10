@@ -366,6 +366,96 @@ async function newChessGame() {
 
 $("#chess-new").addEventListener("click", newChessGame);
 
+// --- system status + running jobs (control panel) --------------------------
+
+function populateModelOptions(models) {
+  const datalist = $("#research-models-datalist");
+  const hint = $("#research-models-hint");
+  if (!datalist) return;
+  datalist.innerHTML = "";
+  for (const name of models) {
+    const opt = document.createElement("option");
+    opt.value = name;
+    datalist.appendChild(opt);
+  }
+  if (hint) {
+    hint.textContent = models.length
+      ? `Installed locally: ${models.join(", ")}`
+      : "No models found — pull one with: ollama pull <model>";
+  }
+}
+
+async function loadStatus() {
+  const line = $("#system-status");
+  try {
+    const status = await api("/api/status");
+    if (status.ollama === "up") {
+      const count = status.models.length;
+      line.textContent = `Ollama: running — ${count} model${count === 1 ? "" : "s"} available.`;
+      line.classList.remove("error");
+      populateModelOptions(status.models);
+    } else {
+      line.textContent = "Ollama: not reachable. Start it, then reload this page.";
+      line.classList.add("error");
+      populateModelOptions([]);
+    }
+  } catch (e) {
+    line.textContent = `Could not check status: ${e.message}`;
+    line.classList.add("error");
+  }
+}
+
+function formatElapsed(seconds) {
+  if (seconds < 60) return `${seconds}s`;
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `${minutes}m ${seconds % 60}s`;
+  const hours = Math.floor(minutes / 60);
+  return `${hours}h ${minutes % 60}m`;
+}
+
+async function loadJobs() {
+  const container = $("#jobs-list");
+  let data;
+  try {
+    data = await api("/api/jobs");
+  } catch (_) {
+    return; // transient — leave whatever was last shown, next poll will retry
+  }
+  if (data.jobs.length === 0) {
+    container.innerHTML = '<p class="status-line">No jobs started yet this session.</p>';
+    return;
+  }
+  container.innerHTML = "";
+  for (const job of data.jobs) {
+    const row = document.createElement("div");
+    row.className = "job-row";
+    row.innerHTML = `
+      <div class="job-info">
+        <span class="job-status-dot ${job.running ? "running" : "done"}"></span>
+        <span class="job-label">${job.label}</span>
+        <span class="job-meta">${job.running ? "running" : "finished"} · ${formatElapsed(job.elapsed_seconds)} · pid ${job.pid}</span>
+      </div>
+      ${job.running ? `<button class="danger job-stop" data-job="${job.id}">Stop</button>` : ""}
+    `;
+    container.appendChild(row);
+  }
+  container.querySelectorAll("[data-job]").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      btn.disabled = true;
+      btn.textContent = "Stopping...";
+      try {
+        await api(`/api/jobs/${btn.dataset.job}/stop`, { method: "POST" });
+        showToast("Stop signal sent.");
+      } catch (e) {
+        showToast(`Could not stop: ${e.message}`, true);
+        btn.disabled = false;
+        btn.textContent = "Stop";
+      }
+      loadJobs();
+    });
+  });
+}
+
 // --- premium ---------------------------------------------------------------
 
 async function loadPremium() {
@@ -412,3 +502,7 @@ $("#premium-unlock").addEventListener("click", unlockPremium);
 loadPersonas().catch(() => {});
 loadRoutines().catch(() => {});
 loadPremium().catch(() => {});
+loadStatus().catch(() => {});
+loadJobs().catch(() => {});
+setInterval(() => loadJobs().catch(() => {}), 3000);
+setInterval(() => loadStatus().catch(() => {}), 15000);
