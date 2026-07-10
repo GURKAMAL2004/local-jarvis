@@ -3,13 +3,17 @@
 A private AI agent for Windows that runs 100% locally via [Ollama](https://ollama.com)
 — no cloud, no API keys, no subscription, nothing you type ever leaves your
 computer. It can chat, research a topic like a scientist, run real browser/shell
-automation, teach itself routines, play chess, and now has a full web
-interface anyone can use — not just people comfortable with a terminal.
+automation, teach itself routines, play chess, run a distraction-free YouTube
+kiosk with zero buttons and zero algorithm, and it has a full web interface
+anyone can use — not just people comfortable with a terminal.
+
+![deskbot web UI](docs/screenshots/web-ui-home.png)
 
 **Status: Phase 1 (Core), Phase 2 (Hands), and Phase 3 (Routines) complete,**
-plus deep research, chess, and a web UI built on top. Phases 4–5 (screen
-vision & game automation, WhatsApp customer chat) are not implemented yet —
-see [Roadmap](#roadmap) below for what's coming.
+plus deep research, chess, a web UI, and a no-button voice-of-command YouTube
+kiosk built on top. Phases 4–5 (screen vision & game automation, WhatsApp
+customer chat) are not implemented yet — see [Roadmap](#roadmap) below for
+what's coming.
 
 ## Quick Start (2 minutes, no coding required)
 
@@ -73,6 +77,13 @@ below for the complete command list.
   on failure so the model can self-correct, capped at 8 steps, with stuck
   detection if the same tool+arguments get called repeatedly with no
   progress.
+- **Instant quick actions** (`deskbot/resolver.py`): obvious commands —
+  "open youtube", "launch notepad" — are matched against a config-driven
+  alias table and executed directly through the same `browse`/`open_app`
+  tools the model would use, with **zero LLM calls**. Only genuinely
+  ambiguous or unfamiliar phrasing falls through to the full tool-calling
+  loop, so the common case is instant instead of paying a model round trip
+  for something that doesn't need one.
 
 **Phase 3 — Routines:**
 - `deskbot teach <name>`: describe a task once, deskbot performs it via the
@@ -95,6 +106,15 @@ below for the complete command list.
   aborts with a readable log if that also fails — it never hangs or loops
   forever. DESTRUCTIVE shell commands auto-decline (rather than hang
   forever) when a routine runs non-interactively, e.g. via Task Scheduler.
+
+**Watch Kiosk — a YouTube player with no algorithm and no buttons:**
+- `deskbot watch` opens a dedicated, chromeless window: no search bar, no
+  homepage, no recommended-videos rail — you say what you want, it finds a
+  real video and plays it. See [Watch Kiosk](#watch-kiosk) below for the
+  full design.
+- Every control — volume, mute, pause, splitting the screen into up to
+  four videos, resizing a pane — is a typed sentence, not a click. There is
+  no button, slider, or keyboard shortcut anywhere in the app.
 
 ## Install
 
@@ -139,7 +159,7 @@ deskbot do "open edge, search for insulated bottle vacuum physics, open the two 
 # Deep, multi-round research — NOT a single search. See "Deep research architecture" below.
 deskbot research "wifi vs ethernet speed"
 # Run from a real terminal with no flags and you'll get an interactive
-# arrow-key menu (Quick/Standard/Deep/Relentless/Scientist/Custom) and,
+# arrow-key menu (Quick/Standard/Deep/Relentless/Scientist/Authority/Custom) and,
 # optionally, which locally pulled Ollama model(s) to use for this one run.
 # Press Enter on any question to keep the sensible default. Non-interactive
 # callers (scripts, `deskbot run`, scheduled tasks) skip the menu automatically.
@@ -158,6 +178,14 @@ deskbot research "what actually determines a country's inflation rate" --mode re
 # actively hunts for evidence that would DISPROVE each relationship (not
 # just confirm it), and rates confidence by source credibility.
 deskbot research "does creatine improve cognitive performance" --mode scientist
+
+# Authority: invents a plausible domain-expert persona for the topic and
+# writes the report in that voice — LaTeX equations for anything
+# quantitative, (Author, Year, Journal, Vol:Pages)-style citations — then
+# appends a large taxonomy of hundreds of specific, testable research
+# questions (each with a hypothesis and a suggested method), organized into
+# primary domains and subtopics. The academic-review equivalent of Deep mode.
+deskbot research "fundamental physics of loudspeaker construction" --mode authority
 
 # Create a new persona interactively
 deskbot persona create
@@ -189,6 +217,12 @@ deskbot chess --color black
 deskbot ui
 deskbot ui --port 9000 --no-browser
 
+# Open the distraction-free YouTube kiosk — say what you want to watch,
+# then control everything (volume, pause, split screen, resize) by typing.
+# See "Watch Kiosk" below.
+deskbot watch
+deskbot watch --port 9001
+
 # Diagnose your environment (Ollama up? model pulled? Playwright/browser ok?)
 deskbot doctor
 ```
@@ -204,12 +238,16 @@ developer to actually get work done in.
 - **Chat** — plain persona conversation (same `Agent.converse`/memory the
   CLI's `deskbot chat` uses, so history is shared and persists).
 - **Deep Research** — pick a topic and a depth (Quick/Standard/Deep/
-  Relentless/Scientist), watch it work in a live console panel, read the
+  Relentless/Scientist/Authority), watch it work in a live console panel, read the
   finished report, or hit Stop at any point — the Relentless/Scientist modes
   don't stop on their own by design, so this is the actual Ctrl+C for them.
   An "Advanced" section lets you pick specific planning/writing models.
+
+  ![Deep Research panel](docs/screenshots/web-ui-research.png)
 - **Chess** — a real clickable board (legality is still 100% code-driven,
   same as the terminal version — see `chess_game.py`).
+
+  ![Chess panel](docs/screenshots/web-ui-chess.png)
 - **Routines** — list and run anything already taught via `deskbot teach`,
   with live output.
 - **Premium** — see below.
@@ -302,7 +340,14 @@ anything. What it does instead:
    every earlier one, even with explicit "cover all sections" instructions.
    So each round is synthesized into its own section **independently** (the
    model literally can't lose track of earlier rounds, because it never sees
-   them while writing a later one).
+   them while writing a later one). Independent also means concurrent: every
+   section drafts (and fact-checks) at the same time on a small thread pool
+   (`research.synthesis_workers`, default 4) instead of one at a time, and
+   the report-level passes that don't depend on each other — key findings,
+   contradictions, factor analysis — run in parallel too. On a long
+   "relentless"/"scientist" run with a dozen-plus angles, that's the
+   difference between waiting through a dozen sequential model calls and
+   waiting through effectively one.
 5. **Self-fact-check pass** (`research.verify_sections`, default on): each
    drafted section is re-checked against its own source excerpts and
    corrected if it contains a claim the sources don't actually support —
@@ -351,7 +396,41 @@ anything. What it does instead:
      correlation-without-causation, and lists confounding variables — a
      "## Scientific Assessment" section replaces the plain "Factors &
      Correlations" one, and a "## Hypothesis" section opens the report.
-10. The report is saved as Markdown to your **Desktop, in a `deskbot-research`
+10. **Academic/"Authority" mode** (opt-in — `ResearchOptions.academic_mode`,
+    on for the **Authority** preset): the review-article treatment.
+    - **Invented expert voice:** `generate_expert_persona` invents one
+      plausible, field-appropriate domain expert for the topic (name,
+      credentials, institutions, decades of experience) with a single small
+      model call — the same trick this module uses everywhere: a narrow,
+      well-scoped ask the model is actually reliable at, instead of hoping
+      every downstream call "just sounds like an expert" unprompted. Every
+      section, the key findings, the contradictions pass, and the conclusion
+      are then written in that voice.
+    - **LaTeX and real citation formatting:** quantitative relationships get
+      expressed as LaTeX equations (inline `$F = Bli$` or display
+      `$$...$$`), and specific findings get cited as
+      `(Author, Year, Journal, Volume:Pages)` — with a
+      `[citation needed — proposed: ...]` marker instead of a fabricated
+      citation when the model isn't actually certain of one. The
+      fact-check pass is told to leave equations and citation markers alone
+      unless they contradict a source, since they're standard field
+      knowledge and explicit uncertainty flags, not claims the scraped web
+      sources need to restate verbatim.
+    - **Research taxonomy:** `generate_research_taxonomy` builds a large
+      hierarchy of specific, testable research questions — primary domains,
+      then subtopics per domain, then leaf items per subtopic, each leaf a
+      question + a falsifiable hypothesis + a suggested method — using the
+      exact same deterministic-pagination trick as factor/correlation
+      digging (ask for a numbered list, parse it, recurse) rather than
+      asking a small local model for "hundreds of rigorous research
+      questions" in one impossible shot. Every independent branch at every
+      level fans out concurrently on the same thread pool section synthesis
+      uses (default 10 domains × 6 subtopics × 10 leaves = up to 600
+      questions; deskbot reports the actual count achieved rather than
+      silently claiming the full total, since small local models don't
+      always fill every branch). Appended to the report as "## Research
+      Taxonomy".
+11. The report is saved as Markdown to your **Desktop, in a `deskbot-research`
     folder** (falls back to `~/.deskbot/research_reports` if the Desktop write
     ever fails) and opened automatically.
 
@@ -374,17 +453,20 @@ sources/rounds, thorough fact-check), **Relentless** (factor/correlation
 digging, step 8 above, with round/budget ceilings set so high they're not
 the practical limit — Ctrl+C is), **Scientist** (Relentless plus the
 hypothesis-driven, disconfirmation-seeking, credibility-weighted mode from
-step 9), or **Custom** (prompts for every setting individually: max sources,
-character budgets, follow-up/total round counts, fact-check on/off, adaptive
-digging on/off, factor/correlation digging on/off, and — if that's on —
-scientific mode on/off; saying yes to factor/correlation digging switches
-the round/budget fields to the same effectively-unbounded ceilings Relentless
-uses). It then offers to pick a planning model and a writing model from
-whatever's currently pulled in Ollama, with tab-autocomplete over them (type
-`same` for the writing model to reuse the planning model) — leave either
-blank to keep config.yaml's value. If `questionary` is ever unavailable, the
-menu falls back to a plain numbered prompt automatically rather than crashing.
-Skip the menu entirely with `--mode {quick,standard,deep,relentless,scientist}`,
+step 9), **Authority** (Deep-level source gathering plus the invented-expert
+voice, LaTeX/citation formatting, and research taxonomy from step 10), or
+**Custom** (prompts for every setting individually: max sources, character
+budgets, follow-up/total round counts, fact-check on/off, adaptive digging
+on/off, factor/correlation digging on/off and — if that's on — scientific
+mode on/off, and academic/authority mode on/off; saying yes to
+factor/correlation digging switches the round/budget fields to the same
+effectively-unbounded ceilings Relentless uses). It then offers to pick a
+planning model and a writing model from whatever's currently pulled in
+Ollama, with tab-autocomplete over them (type `same` for the writing model
+to reuse the planning model) — leave either blank to keep config.yaml's
+value. If `questionary` is ever unavailable, the menu falls back to a plain
+numbered prompt automatically rather than crashing.
+Skip the menu entirely with `--mode {quick,standard,deep,relentless,scientist,authority}`,
 `--no-menu`, `--quick-model <name>`, or `--synthesis-model <name>`;
 non-interactive callers (routines, `deskbot schedule`, anything without a real stdin) skip
 the menu automatically so they never hang waiting for input.
@@ -460,6 +542,69 @@ weaker chess, never an invalid one. Set `chess.model` in config to use a
 specific model (defaults to your RAM tier's model); a bigger model will
 generally play stronger, more sensible chess.
 
+### Watch Kiosk
+
+`deskbot watch` opens a second, dedicated, chromeless window (no address
+bar, no tabs — the closest thing to a native app Chromium supports without
+an Electron/Tauri shell) with exactly two things on screen: a video area and
+a floating chat composer. No search bar, no homepage, no recommended-videos
+rail, no autoplay-into-whatever's-next. You say what you want to watch; it
+finds a real video and plays it. Built to answer a specific complaint —
+YouTube's own UI is optimized to keep you scrolling, not to get you what you
+actually asked for.
+
+![Watch Kiosk mid-conversation](docs/screenshots/watch-kiosk.png)
+
+**No buttons, anywhere — every control is a typed sentence.** Once a video
+is playing, volume, mute, pause, closing a pane, splitting the screen into
+up to four videos, and resizing how much of the screen each one gets are
+all just things you say — `"turn it up"`, `"mute the lofi one"`,
+`"split into three"`, `"make this bigger"`. There is no icon, slider, or
+keyboard shortcut anywhere in the app; that's a deliberate constraint, not a
+missing feature.
+
+- **Grounded, never hallucinated.** The model doesn't invent a video —
+  `tools/youtube.py`'s `search_youtube()` scrapes real results (title,
+  channel, video ID) straight off youtube.com, and the model is only ever
+  allowed to pick an index from that real, already-fetched list — the exact
+  same "code searches, model only picks from what's actually there"
+  discipline `deskbot research` uses. It asks up to `watch.max_questions`
+  (default 3) clarifying questions first, and only when the answer would
+  actually change which video is right.
+- **Never shows YouTube's own broken-embed screen.** Official/label music
+  videos frequently have embedding disabled — a bare `<iframe>` would show
+  YouTube's own "Video unavailable — Watch on YouTube" screen, complete with
+  a link straight out of the kiosk and back into the exact algorithm-driven
+  browsing this exists to avoid. `watch.js` uses the real YouTube IFrame
+  Player API instead of a bare iframe specifically for its `onError`
+  callback, and silently retries the next real result already found. You
+  just see the "Playing:" line update; the failure never reaches you.
+- **A real resizable 1–4 pane video wall.** "Split into three" or "give me
+  four videos" rearranges an actual CSS Grid (draggable-style resizing, just
+  driven by "make this bigger" instead of a mouse), with each pane running
+  its own independent search conversation and its own player instance —
+  adding a pane never interrupts what's already playing in another one.
+- **Two-tier command routing, because a small local model can't reliably
+  choose between eight JSON shapes every time.** Layout changes and short,
+  unambiguous commands are resolved by a deterministic parser client-side —
+  zero model calls, zero latency, correct regardless of which model you've
+  got pulled. Only genuinely ambiguous phrasing (title references like "the
+  recipe video", "pause everything") falls through to an LLM classifier
+  that's handed every pane's live state and decides intent + target in one
+  structured call. This split exists because it was tested against a real
+  local model during development and *needed* to exist: the deterministic
+  layer alone fixed a case where the classifier's own JSON field name
+  collided with wording earlier in its own prompt and reliably corrupted
+  its output for exactly one action type — found by testing against the
+  real model, not assumed, and fixed by renaming the field and adding a
+  regex fast-path in front of it, not by hoping a bigger model would paper
+  over it.
+
+See [`deskbot/webui/watch.py`](deskbot/webui/watch.py) for the ask → search
+→ play state machine and the command classifier, and
+[`watch.js`](deskbot/webui/static/watch.js) for the fast-path/classifier
+routing and the resizable multi-pane grid.
+
 ### Creating a persona
 
 `deskbot persona create` walks you through: name, role, tone, greeting
@@ -508,6 +653,8 @@ model is actually pulled.
 | `deskbot teach` says "no tool calls were recorded" | Model answered conversationally instead of using a tool | Be explicit: "Use the X tool to ..." rather than an open-ended request — small models especially need the nudge |
 | `deskbot run` fails with "needs parameter X" | Someone hand-edited the routine YAML and removed a placeholder's default | Add `--param X=<value>` when running, or restore a default under `placeholders:` in the YAML |
 | `deskbot schedule` rejects your cron string | Outside the supported 5-field subset | Use one of: `M H * * *`, `M H * * D`, `*/N * * * *`, `0 */N * * *` (see `deskbot schedule --help`) |
+| `deskbot watch` commands silently get treated as a search (e.g. "split into 4" tries to play a video called that) | Ollama isn't reachable — the classifier can't tell the difference and falls back to "treat this as a search" | `deskbot doctor`, or just `ollama serve`; layout changes and simple volume/mute/pause commands are resolved without Ollama at all once it's back, everything else needs it reachable |
+| A chosen video shows "Video unavailable" for a moment then changes | Normal — that title has embedding disabled (common for official music videos); the kiosk's `onError` handler is retrying the next real result automatically | Nothing to fix — if every candidate fails you'll see a plain error bubble instead |
 
 ## Verifying yourself
 
@@ -535,6 +682,16 @@ deskbot research "wifi vs ethernet speed"
 # Verify for yourself: the console prints each round's search query and which
 # pages it actually read; the saved report's "Sources" list shows which round
 # each source came from, and every round should get its own section.
+
+# Watch Kiosk — no-button, LLM-command-driven YouTube:
+deskbot watch
+# Type: "mobile repair video" — it should ask a short clarifying question,
+# then play a real video (never an invented one — check the title/channel
+# against an actual YouTube search yourself).
+# Then, with something playing, try: "turn it up", "mute it", "pause it",
+# "split into two", "make this bigger" — every one of those should work
+# with no button, slider, or keyboard shortcut anywhere on screen.
+python -m pytest tests/test_resolver.py tests/test_watch.py -v
 ```
 
 ## Roadmap
@@ -560,11 +717,14 @@ deskbot/            the installable Python package
   config.py          config.yaml loading, RAM-tier resolution
   doctor.py          environment diagnostics
   logging_setup.py   rotating file logs + rich console
+  resolver.py        instant quick-action fast path (zero-LLM-call alias resolution)
+  watch_kiosk.py      `deskbot watch` — launches the chromeless kiosk window + its backend
   tools/             Phase 2 tool layer
     safety.py          SAFE/CAUTION/DESTRUCTIVE classification
     shell.py           run_shell tool
     apps.py            open_app tool (registry/PATH/Start Menu resolution)
     browser.py         Playwright browser session + browse/search/click/... tools
+    youtube.py          grounded YouTube search scraper for the Watch Kiosk
   routines.py        Phase 3 routine model (load/save/list/delete, placeholder substitution)
   teach.py           `deskbot teach` — record a task as a routine
   routine_runner.py  `deskbot run` — replay with retry + LLM re-plan-once
@@ -572,13 +732,16 @@ deskbot/            the installable Python package
   research.py        `deskbot research` — multi-round search/scrape/map-reduce-synthesize pipeline
   chess_game.py      `deskbot chess` — terminal chess vs. the local model (legality is code-driven)
   webui/             `deskbot ui` — local web interface
-    server.py          FastAPI app: chat/research/chess/routines/premium routes
+    server.py          FastAPI app: chat/research/chess/routines/premium/watch routes
     jobs.py            subprocess-based streaming runner for research/routine jobs
+    watch.py           Watch Kiosk: ask/search/play state machine + no-button command classifier
     licensing.py       premium unlock-code verification (public key only)
     generate_license.py  developer-only: mints unlock codes (needs the private key)
     static/            index.html, style.css, app.js — no build step, no CDN deps
+      watch.html/.css/.js  the Watch Kiosk frontend — resizable grid, no buttons anywhere
   defaults/          packaged defaults copied into ~/.deskbot on first run
 tests/               pytest smoke suite (isolated from your real ~/.deskbot)
+docs/screenshots/    README images
 game_profiles/       (Phase 4) — empty for now
 install.ps1          Windows installer (primary)
 install.sh           Linux/macOS installer (secondary)
